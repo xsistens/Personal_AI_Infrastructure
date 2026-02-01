@@ -608,6 +608,128 @@ bun BackupRestore.ts migrate <backup-name>       # Analyze for migration
 
 ---
 
+## CI/CD Workflows
+
+The `.github/workflows/` directory contains GitHub Actions workflows that automate code review and AI-assisted development. These workflows integrate Claude Code directly into the GitHub pull request and issue workflow.
+
+### Available Workflows
+
+| Workflow File | Name | Purpose |
+|---------------|------|---------|
+| `claude-code-review.yml` | Claude Code Review | Automated AI code review on pull requests |
+| `claude.yml` | Claude Code | Interactive AI assistance via @claude mentions |
+
+### Claude Code Review (`claude-code-review.yml`)
+
+**Purpose:** Automatically runs AI-powered code review on all pull requests.
+
+**Triggers:**
+- `pull_request.opened` — When a new PR is opened
+- `pull_request.synchronize` — When commits are pushed to an existing PR
+- `pull_request.ready_for_review` — When a draft PR is marked ready
+- `pull_request.reopened` — When a closed PR is reopened
+
+**What It Does:**
+1. Checks out the repository with minimal depth (`fetch-depth: 1`)
+2. Invokes Claude Code Action with the `code-review` plugin
+3. Analyzes the PR diff and provides feedback
+
+**Configuration Options (commented out but available):**
+- Path filtering — Only run on specific file types (e.g., `src/**/*.ts`)
+- Author filtering — Only run for specific contributors (e.g., `FIRST_TIME_CONTRIBUTOR`)
+
+**Permissions Required:**
+- `contents: read` — Read repository content
+- `pull-requests: read` — Access PR details
+- `issues: read` — Access issue context
+- `id-token: write` — OAuth authentication
+
+**Secrets Required:**
+- `CLAUDE_CODE_OAUTH_TOKEN` — Claude Code authentication token
+
+### Claude Code Interactive (`claude.yml`)
+
+**Purpose:** Enables interactive AI assistance by mentioning `@claude` in issues, PRs, and comments.
+
+**Triggers:**
+- `issue_comment.created` — Comments on issues containing `@claude`
+- `pull_request_review_comment.created` — PR review comments containing `@claude`
+- `pull_request_review.submitted` — PR reviews containing `@claude`
+- `issues.opened` — New issues with `@claude` in title or body
+- `issues.assigned` — Issue assignments (if body/title contains `@claude`)
+
+**Conditional Execution:**
+The workflow only runs if `@claude` is mentioned in the relevant context (comment body, review body, issue title/body).
+
+**What It Does:**
+1. Responds to `@claude` mentions with AI-generated assistance
+2. Can read CI results from PRs (via `actions: read` permission)
+3. Follows instructions from the comment that tagged it
+
+**Permissions Required:**
+- `contents: read` — Read repository content
+- `pull-requests: read` — Access PR details
+- `issues: read` — Access issue context
+- `id-token: write` — OAuth authentication
+- `actions: read` — Read CI results on PRs
+
+**Secrets Required:**
+- `CLAUDE_CODE_OAUTH_TOKEN` — Claude Code authentication token
+
+### Key Patterns
+
+**1. OAuth Authentication:**
+Both workflows use `claude_code_oauth_token` for authentication rather than API keys, following Claude Code's recommended pattern.
+
+**2. Minimal Checkout:**
+Both use `fetch-depth: 1` for faster checkout, only fetching the latest commit rather than full history.
+
+**3. Plugin Marketplace:**
+The code review workflow references a plugin marketplace (`https://github.com/anthropics/claude-code.git`) and uses the `code-review@claude-code-plugins` plugin.
+
+**4. Conditional Execution:**
+The interactive workflow uses a complex `if` condition to only run when `@claude` is explicitly mentioned, preventing unnecessary workflow runs.
+
+### Setting Up CI/CD
+
+To enable these workflows in your fork:
+
+1. **Create OAuth Token:**
+   - Generate a Claude Code OAuth token from your Claude account
+   - Add it as a repository secret named `CLAUDE_CODE_OAUTH_TOKEN`
+
+2. **Enable Workflows:**
+   - Go to repository Settings → Actions → General
+   - Ensure "Allow all actions and reusable workflows" is selected
+
+3. **Test:**
+   - Open a PR to trigger automatic code review
+   - Comment `@claude explain this code` on any issue or PR
+
+### Extending Workflows
+
+**Adding Path Filters:**
+```yaml
+on:
+  pull_request:
+    paths:
+      - "src/**/*.ts"
+      - "src/**/*.tsx"
+```
+
+**Adding Author Filters:**
+```yaml
+if: |
+  github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
+```
+
+**Custom Prompts:**
+```yaml
+prompt: 'Summarize the changes and suggest improvements.'
+```
+
+---
+
 ## Next Steps
 
 This exploration report covers the top-level structure. Subsequent phases will document:
