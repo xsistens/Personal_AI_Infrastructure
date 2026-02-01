@@ -200,6 +200,134 @@ The 16 guiding principles:
 
 ---
 
+## Pack Structure
+
+Understanding the standard pack structure is essential for contributing to PAI. This section documents the canonical layout derived from analyzing reference implementations (`pai-core-install`, `pai-browser-skill`) and the official `PAIPackTemplate.md`.
+
+### Standard File Layout
+
+Every pack is a **directory** containing three mandatory files plus a `src/` folder:
+
+```
+pack-name/
+├── README.md           # Pack overview, architecture, what it solves
+├── INSTALL.md          # Step-by-step installation instructions (AI-friendly)
+├── VERIFY.md           # Mandatory verification checklist with pass/fail
+└── src/                # Actual source code files
+    ├── hooks/          # Hook implementations (if applicable)
+    ├── tools/          # CLI tools and utilities
+    ├── skills/         # Skill definitions and workflows
+    └── config/         # Configuration files
+```
+
+**Why this structure?**
+
+- **Real code files** — TypeScript, YAML, etc. can be linted and tested
+- **Clear separation** — README for context, INSTALL for steps, VERIFY for validation
+- **Verbatim copying** — AI agents copy actual files instead of extracting from markdown
+- **Token efficiency** — Avoids single-file packs exceeding context limits
+
+### YAML Frontmatter Requirements
+
+Every `README.md` must include YAML frontmatter with these fields:
+
+```yaml
+---
+name: Pack Name                              # Human-readable (24 words max)
+pack-id: author-pack-name-variant-v1.0.0     # Unique identifier
+version: 1.0.0                               # SemVer format
+author: danielmiessler                       # GitHub username
+description: One-line description            # 128 words max
+type: skill | hook | concept | workflow      # Pack type
+purpose-type: [security, productivity, ...]  # Multi-value purpose tags
+platform: claude-code                        # Target platform
+dependencies: []                             # Required pack-ids
+keywords: [searchable, tags]                 # 24 tags max
+---
+```
+
+### Icon Requirement
+
+Every pack must have a **256x256 transparent PNG icon** in the `Packs/icons/` directory:
+
+- Transparent background (use `--remove-bg` flag when generating)
+- Blue (#4a90d9) primary color
+- Purple (#8b5cf6) accent only (10-15%)
+- Simple enough to recognize at 64x64
+
+### src/ Subdirectory Organization
+
+The `src/` directory mirrors the installation target structure:
+
+| Subdirectory | Purpose | Example Files |
+|--------------|---------|---------------|
+| `skills/` | Skill definitions and workflows | `SKILL.md`, `Workflows/*.md` |
+| `hooks/` | Event hook implementations | `stop-hook.ts`, `lib/observability.ts` |
+| `tools/` | CLI utilities | `Browse.ts`, `Inference.ts` |
+| `config/` | Configuration templates | `settings.json`, `.env.example` |
+
+### Infrastructure Pack Example: `pai-core-install`
+
+| Component | Location | Purpose |
+|-----------|----------|---------|
+| SKILL.md | `skills/CORE/SKILL.md` | Main skill definition with routing |
+| SYSTEM docs | `skills/CORE/SYSTEM/` | 19 architecture documentation files |
+| USER templates | `skills/CORE/USER/` | Empty user customization structure |
+| WORK templates | `skills/CORE/WORK/` | Sensitive work directory placeholder |
+| Workflows | `skills/CORE/Workflows/` | 4 core workflows (Delegation, SessionContinuity, etc.) |
+| Tools | `skills/CORE/Tools/` | 4 CLI tools (Inference, SessionProgress, etc.) |
+
+**Total: 34 files created, 0 dependencies**
+
+### Skill Pack Example: `pai-browser-skill`
+
+| Component | Location | Purpose |
+|-----------|----------|---------|
+| SKILL.md | `skills/Browser/SKILL.md` | Skill definition |
+| index.ts | `skills/Browser/index.ts` | PlaywrightBrowser class |
+| Tools/ | `skills/Browser/Tools/` | Browse.ts, BrowserSession.ts |
+| Workflows/ | `skills/Browser/Workflows/` | Extract, Interact, Screenshot, VerifyPage |
+| examples/ | `skills/Browser/examples/` | Working code examples |
+
+**Dependencies:** pai-core-install, bun, playwright
+
+### Installation Wizard Pattern
+
+The `INSTALL.md` files follow a **wizard-style** pattern designed for AI agents:
+
+1. **Phase 1: System Analysis** — Detect existing installations, conflicts, dependencies
+2. **Phase 2: User Questions** — Use `AskUserQuestion` for decisions (upgrade vs fresh, identity config)
+3. **Phase 3: Backup** — Create timestamped backup if upgrading
+4. **Phase 4: Installation** — Create directories, copy files, configure settings
+5. **Phase 5: Verification** — Run all checks from `VERIFY.md`
+6. **Phase 6: Personalization** — Optional customization prompts
+
+### Verification Checklist Pattern
+
+The `VERIFY.md` files provide:
+
+- **Quick verification** — All-in-one bash script for pass/fail
+- **Detailed verification** — Individual checks with expected outputs
+- **Functional tests** — End-to-end behavior validation
+- **Troubleshooting** — Common issues and resolution steps
+
+Example verification structure:
+
+```bash
+# Quick verification
+test -f ~/.claude/skills/CORE/SKILL.md && echo "PASS" || echo "FAIL"
+test -d ~/.claude/skills/CORE/SYSTEM && echo "PASS" || echo "FAIL"
+```
+
+### Key Design Principles
+
+1. **End-to-End Complete** — Every component in a data flow must be included (no "beyond scope")
+2. **AI-Installable** — Instructions written for AI agents, not humans copying commands
+3. **Never Block** — Hooks and tools fail gracefully, never interrupt work
+4. **SYSTEM/USER Separation** — SYSTEM files can be updated; USER files are never overwritten
+
+---
+
 ## Next Steps
 
 This exploration report covers the top-level structure. Subsequent phases will document:
