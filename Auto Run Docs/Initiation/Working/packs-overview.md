@@ -9,6 +9,8 @@ tags:
 related:
   - "[[exploration-report]]"
   - "[[Skills-Overview]]"
+  - "[[Hooks-Overview]]"
+  - "[[Tools-Overview]]"
 ---
 
 # PAI Packs Overview
