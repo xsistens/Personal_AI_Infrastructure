@@ -428,6 +428,186 @@ Currently, only the Official PAI Bundle is available:
 
 ---
 
+## Contributor Tools
+
+The `Tools/` directory contains templates and utilities for contributors building and maintaining PAI installations. This section documents the available resources.
+
+### Directory Contents
+
+| File | Type | Purpose |
+|------|------|---------|
+| `README.md` | Documentation | AI usage guide and quick reference |
+| `PAIPackTemplate.md` | Template | Complete specification for creating new packs |
+| `PAIBundleTemplate.md` | Template | Complete specification for creating new bundles |
+| `InstallTemplate.md` | Template | Wizard-style INSTALL.md template |
+| `CheckPAIState.md` | Diagnostic | PAI installation health checker |
+| `validate-pack.ts` | Validation | Pack completeness validator script |
+| `validate-protected.ts` | Validation | Protected files/secrets validator |
+| `BackupRestore.ts` | Utility | Backup and restore PAI installations |
+| `lib/voice-selection.ts` | Library | Voice selection helper for TTS |
+| `utilities-icon.png` | Asset | Icon for Tools directory |
+
+### Templates
+
+#### PAIPackTemplate.md — Pack Creation Specification
+
+The complete specification for creating PAI packs. Key aspects:
+
+**Pack Structure (v2.0):**
+```
+pack-name/
+├── README.md           # Pack overview, architecture
+├── INSTALL.md          # AI-friendly installation steps
+├── VERIFY.md           # Verification checklist
+└── src/                # Source code files
+    ├── hooks/          # Hook implementations
+    ├── tools/          # CLI utilities
+    ├── skills/         # Skill definitions
+    └── config/         # Configuration files
+```
+
+**Key Requirements:**
+- End-to-end completeness — Every component in a data flow must be included
+- 13-field YAML frontmatter (name, pack-id, version, author, etc.)
+- 256x256 transparent PNG icon with `--remove-bg` flag
+- Pre-installation system analysis (conflict detection, dependency checks)
+- "Why This Is Different" section: 64-word paragraph + 4 eight-word bullets
+
+**The Chain Test:** Before publishing, trace every data flow. If ANY link says "implement your own" or "beyond scope," the pack is incomplete.
+
+#### PAIBundleTemplate.md — Bundle Creation Specification
+
+The complete specification for creating PAI bundles (curated pack collections):
+
+**Bundle Structure:**
+```
+Bundles/
+└── YourBundle/
+    ├── README.md             # Bundle specification (required)
+    └── your-bundle-icon.png  # 256x256 transparent PNG (optional)
+```
+
+**Key Requirements:**
+- AI Installation Wizard section with interactive questions
+- Architecture diagram showing how packs work together
+- Installation order table with dependencies
+- "Why This Is Different" section (same format as packs)
+- Bundle tiers: Starter (2-3), Intermediate (4-6), Advanced (7-10), Complete (10+)
+
+**Critical Principle:** Bundles must explain not just WHAT packs to install, but WHY they work together and what emergent capabilities arise from the combination.
+
+#### InstallTemplate.md — Wizard-Style Installation
+
+A template for creating wizard-style INSTALL.md files that guide AI agents through installation:
+
+**Six Phases:**
+1. **System Analysis** — Detect existing installations, prerequisites
+2. **User Questions** — Use `AskUserQuestion` at decision points
+3. **Backup** — Create timestamped backup if needed
+4. **Installation** — Create directories, copy files (tracked with `TodoWrite`)
+5. **Verification** — Execute VERIFY.md checks
+6. **Success/Failure** — Clear messaging with next steps
+
+**Key Design Principles:**
+- Wizard-style (guide interactively, don't dump commands)
+- Conditional questions (only ask about conflicts/missing prereqs)
+- `TodoWrite` for progress tracking
+- Clear success/failure messages
+
+### Diagnostic Tools
+
+#### CheckPAIState.md — Installation Health Checker
+
+A comprehensive diagnostic workflow for assessing PAI installation health. Usage:
+
+```
+Read CheckPAIState.md and check my PAI state. Give me recommendations.
+```
+
+**What it checks:**
+1. PAI installation location (`~/.pai/` or `~/.config/pai/`)
+2. Hook system (foundation for everything else)
+3. History system (event capture and logging)
+4. Skill system (capability routing)
+5. Voice system (optional TTS notifications)
+6. Observability server (optional monitoring)
+7. Identity configuration (optional personalization)
+
+**Output:** Health report with installed packs, issues found, and suggested next steps.
+
+### Validation Scripts
+
+#### validate-pack.ts — Pack Completeness Validator
+
+Validates that PAI packs meet completeness requirements:
+
+```bash
+bun run Tools/validate-pack.ts                    # Validate all packs
+bun run Tools/validate-pack.ts pai-agents-skill   # Validate specific pack
+bun run Tools/validate-pack.ts --changed-only     # For CI (only changed packs)
+```
+
+**Checks performed:**
+- Required files exist (README.md, INSTALL.md, VERIFY.md)
+- Skill packs have valid SKILL.md with workflow references
+- All referenced workflows exist in Workflows/ directory
+
+**Pack classification:**
+- Skill packs (🎯): Must have SKILL.md with valid workflow references
+- System packs (⚙️): Infrastructure packs, no SKILL.md required
+
+#### validate-protected.ts — Protected Files Validator
+
+Ensures PAI-specific files haven't been overwritten with sensitive content:
+
+```bash
+bun run Tools/validate-protected.ts           # Check all protected files
+bun run Tools/validate-protected.ts --staged  # Check only staged files (for pre-commit)
+```
+
+**Categories scanned:**
+- API keys (Anthropic, OpenAI, AWS, Stripe, etc.)
+- GitHub/Slack tokens
+- Webhooks (Discord, Slack, ntfy, Zapier)
+- Database credentials
+- Private keys (RSA, SSH, PGP)
+- PII (SSN, phone numbers, personal emails)
+- Private paths (/Users/daniel/, ~/.claude/)
+- Customer/team member data
+
+**Uses:** `.pai-protected.json` manifest for pattern definitions and exception files.
+
+### Utility Scripts
+
+#### BackupRestore.ts — Backup and Restore Tool
+
+Backup and restore PAI installations:
+
+```bash
+bun BackupRestore.ts backup                      # Create timestamped backup
+bun BackupRestore.ts backup --name "pre-upgrade" # Create labeled backup
+bun BackupRestore.ts list                        # List available backups
+bun BackupRestore.ts restore <backup-name>       # Restore from backup
+bun BackupRestore.ts migrate <backup-name>       # Analyze for migration
+```
+
+**Features:**
+- Timestamped backups stored in `~/`
+- Pre-restore backup always created automatically
+- Migration analysis identifies: settings, custom hooks, personal skills, memory data
+
+### Quick Reference
+
+| User Request | File to Use |
+|--------------|-------------|
+| "Check my PAI installation" | `CheckPAIState.md` |
+| "Create a new pack" | `PAIPackTemplate.md` |
+| "Create a new bundle" | `PAIBundleTemplate.md` |
+| "Back up my PAI" | `BackupRestore.ts backup` |
+| "Validate my pack" | `validate-pack.ts` |
+
+---
+
 ## Next Steps
 
 This exploration report covers the top-level structure. Subsequent phases will document:
