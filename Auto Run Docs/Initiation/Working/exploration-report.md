@@ -328,6 +328,106 @@ test -d ~/.claude/skills/CORE/SYSTEM && echo "PASS" || echo "FAIL"
 
 ---
 
+## Bundles
+
+Bundles are **curated collections of packs** designed to work together as a harmonious system. While individual packs can be installed standalone, bundles provide tested combinations with proper installation order and documented synergies.
+
+### Why Bundles Exist
+
+Individual packs are powerful, but users face challenges:
+- **Discovery** — Which packs work well together?
+- **Dependencies** — What order to install them?
+- **Integration** — How do capabilities combine?
+- **Verification** — How to confirm everything works?
+
+Bundles solve these by providing:
+1. **Coherent Vision** — Packs selected for a unified goal
+2. **Tested Integration** — Known to work together
+3. **Documented Synergies** — How capabilities combine
+4. **Reduced Friction** — No guessing about compatibility
+
+### Bundle Types
+
+| Type | Description | Example |
+|------|-------------|---------|
+| **Creator Bundle** | All packs from a specific author | Official PAI Bundle (Miessler's Kai system) |
+| **Functionality Bundle** | Packs serving a specific purpose | Research Bundle |
+| **Domain Bundle** | Packs for a specific field | Security Bundle |
+| **Starter Bundle** | Minimal set to get started | PAI Lite |
+
+### Bundle Tiers
+
+| Tier | Pack Count | Description |
+|------|------------|-------------|
+| Starter | 2-3 | Minimal viable collection |
+| Intermediate | 4-6 | Core functionality |
+| Advanced | 7-10 | Extended capabilities |
+| Complete | 10+ | Full experience |
+
+### The Official PAI Bundle (v2.4.0)
+
+The primary bundle, extracted from Daniel Miessler's production Kai system. It's a **Complete** tier bundle with 23 packs total.
+
+#### Installation Order (Critical)
+
+Packs must be installed **in order** due to dependencies:
+
+**1. Required Foundation Packs:**
+
+| # | Pack | Purpose | Dependencies |
+|---|------|---------|--------------|
+| 1 | `pai-hook-system` | Event-driven automation foundation | None |
+| 2 | `pai-core-install` | Skills + Identity + MEMORY system | Hooks |
+
+**2. Infrastructure Packs:**
+
+| # | Pack | Purpose | Dependencies |
+|---|------|---------|--------------|
+| 3 | `pai-statusline` | 4-mode responsive status line | Core |
+| 4 | `pai-voice-system` | Voice notifications via ElevenLabs | Hooks, Core |
+| 5 | `pai-observability-server` | Multi-agent monitoring dashboard | Hooks |
+
+**3. Skill Packs (18 total, install as needed):**
+
+- Algorithm, Agents, AnnualReports, Art, BrightData, Browser
+- Council, CreateCLI, CreateSkill, FirstPrinciples
+- OSINT, PrivateInvestigator, Prompting, Recon
+- RedTeam, Research, System, Telos
+
+### Bundle vs Full Release
+
+| Approach | What You Get | Best For |
+|----------|--------------|----------|
+| **Bundle Wizard** | Skeleton directory + manual pack installation | Learning the system while building |
+| **Full Release** | Complete `.claude/` directory pre-configured | Immediate working system |
+
+The Bundle wizard (`bun run install.ts`) only creates the directory structure. You must then install each pack manually. For a complete working system immediately, use `Releases/v2.4/`.
+
+### Bundle Installation Process
+
+1. **Wizard Phase** — Run `bun run install.ts` in `Bundles/Official/`
+   - Detects existing AI systems (Claude Code, Cursor, Windsurf, etc.)
+   - Backs up existing `~/.claude` to `~/.claude-BACKUP`
+   - Asks questions (your name, DA name, timezone, voice)
+   - Creates skeleton directory structure
+2. **Pack Installation Phase** — Install each pack IN ORDER
+   - Give pack directory to your DA
+   - DA reads `README.md`, follows `INSTALL.md`, verifies with `VERIFY.md`
+3. **Verification Phase** — Confirm all packs installed correctly
+   - Check directory structure: `ls -la ~/.claude/`
+   - Check hook registration: `cat ~/.claude/settings.json | grep -A 5 "hooks"`
+   - Restart Claude Code to activate hooks
+
+### Available Bundles
+
+Currently, only the Official PAI Bundle is available:
+
+| Bundle | Description | Tier | Status |
+|--------|-------------|------|--------|
+| [Official PAI Bundle](../../Bundles/Official/) | Complete personal AI infrastructure from Kai system | Complete | Active |
+
+---
+
 ## Next Steps
 
 This exploration report covers the top-level structure. Subsequent phases will document:
