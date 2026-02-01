@@ -730,6 +730,124 @@ prompt: 'Summarize the changes and suggest improvements.'
 
 ---
 
+## Visual Architecture Summary
+
+The following diagram shows how PAI's core components relate to each other:
+
+```mermaid
+graph TB
+    subgraph "Bundle Layer"
+        BUNDLE["📦 Bundle<br/>(e.g., Official PAI Bundle)"]
+    end
+
+    subgraph "Pack Layer"
+        BUNDLE --> PACK1["📁 Infrastructure Pack<br/>(pai-hook-system)"]
+        BUNDLE --> PACK2["📁 Infrastructure Pack<br/>(pai-core-install)"]
+        BUNDLE --> PACK3["📁 Skill Pack<br/>(pai-browser-skill)"]
+        BUNDLE --> PACKN["📁 ... more packs"]
+    end
+
+    subgraph "Pack Internal Structure"
+        PACK3 --> README["README.md"]
+        PACK3 --> INSTALL["INSTALL.md"]
+        PACK3 --> VERIFY["VERIFY.md"]
+        PACK3 --> SRC["src/"]
+
+        SRC --> SKILLS["skills/<br/>SKILL.md, Workflows/"]
+        SRC --> HOOKS["hooks/<br/>Event handlers"]
+        SRC --> TOOLS["tools/<br/>CLI utilities"]
+        SRC --> CONFIG["config/<br/>Settings templates"]
+    end
+
+    subgraph "Installation Target (~/.claude/)"
+        SKILLS --> SKILLDIR["skills/Browser/"]
+        HOOKS --> HOOKDIR["hooks/"]
+        TOOLS --> TOOLDIR["Tools/"]
+        CONFIG --> CONFIGDIR["settings.json"]
+    end
+
+    subgraph "SYSTEM/USER Separation"
+        SKILLDIR --> SYSTEM["SYSTEM/<br/>Infrastructure docs<br/>(AI can update)"]
+        SKILLDIR --> USER["USER/<br/>Personal customizations<br/>(Never overwritten)"]
+    end
+
+    style BUNDLE fill:#3b82f6,stroke:#1e40af,color:#fff
+    style PACK1 fill:#8b5cf6,stroke:#6d28d9,color:#fff
+    style PACK2 fill:#8b5cf6,stroke:#6d28d9,color:#fff
+    style PACK3 fill:#8b5cf6,stroke:#6d28d9,color:#fff
+    style PACKN fill:#8b5cf6,stroke:#6d28d9,color:#fff
+    style SYSTEM fill:#22c55e,stroke:#16a34a,color:#fff
+    style USER fill:#f59e0b,stroke:#d97706,color:#fff
+```
+
+### Diagram Explanation
+
+**Bundle → Packs:** Bundles are curated collections of packs installed in a specific order. The Official PAI Bundle contains 23 packs (5 infrastructure + 18 skills).
+
+**Pack → Primitives:** Each pack contains a `src/` directory with the actual components:
+- **Skills** — Capability definitions with workflows and routing
+- **Hooks** — Event handlers (8 event types: UserPromptSubmit, Stop, PreToolUse, etc.)
+- **Tools** — CLI utilities written in TypeScript/Bun
+- **Config** — Settings templates and environment variables
+
+**SYSTEM/USER Separation:** Within installed skills, content is divided:
+- **SYSTEM/** — Infrastructure documentation, can be updated during upgrades
+- **USER/** — Personal customizations, never overwritten by AI
+
+---
+
+## Key Concepts
+
+### 1. Modular, Self-Contained Design
+
+Every PAI pack is **end-to-end complete**. This means:
+
+- **No external dependencies beyond declared ones** — If a pack needs something, it either includes it or lists it as a dependency
+- **The Chain Test** — Trace every data flow through the pack. If ANY link says "implement your own" or "beyond scope," the pack is incomplete
+- **UNIX Philosophy** — Each pack does one thing well and composes with others through standard interfaces
+
+This modularity enables:
+- Installing only what you need
+- Understanding one pack without understanding the entire system
+- Swapping implementations without breaking other components
+
+### 2. AI-Agent Friendly Installation
+
+PAI is designed to be installed **by AI agents**, not by humans copying commands:
+
+- **Wizard-style INSTALL.md** — Guides AI through decisions with `AskUserQuestion` tool
+- **Pre-installation analysis** — Detect conflicts, check prerequisites, identify upgrade paths
+- **Progress tracking** — Use `TodoWrite` to show installation progress
+- **Verification built-in** — Every pack includes `VERIFY.md` with testable checks
+- **Never block** — Hooks and tools fail gracefully; the AI can always continue
+
+This pattern recognizes that AI assistants are the primary installers, capable of:
+- Reading documentation contextually
+- Making decisions based on system state
+- Customizing installation for specific needs
+- Verifying success programmatically
+
+### 3. SYSTEM/USER Separation Principle
+
+PAI maintains a strict separation between infrastructure and personal content:
+
+| Layer | Location | Ownership | Can AI Update? |
+|-------|----------|-----------|----------------|
+| **SYSTEM** | `skills/*/SYSTEM/` | PAI project | ✅ Yes — Updated during upgrades |
+| **USER** | `skills/*/USER/` | You | ❌ Never — Your customizations preserved |
+
+**Why this matters:**
+- **Safe upgrades** — Install new versions without losing personal configurations
+- **Clear boundaries** — Know exactly what's yours vs. what's infrastructure
+- **Migration support** — `BackupRestore.ts` identifies USER content for preservation
+
+**Examples:**
+- `SYSTEM/PAISYSTEMARCHITECTURE.md` — Can be replaced with new version
+- `USER/AISTEERINGRULES.md` — Your personal rules, never touched
+- `USER/TELOS/PROJECTS.md` — Your project registry, preserved across upgrades
+
+---
+
 ## Next Steps
 
 This exploration report covers the top-level structure. Subsequent phases will document:
