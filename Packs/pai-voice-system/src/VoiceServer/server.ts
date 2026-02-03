@@ -14,6 +14,10 @@ import { homedir, platform } from "os";
 import { join } from "path";
 import { existsSync, readFileSync } from "fs";
 
+// Linux-specific modules (no-op on other platforms)
+import { PAI_TTS_ENGINE, PIPER_DEFAULT_MODEL, checkPiperAvailable, generateSpeechPiper } from './linux-service/piper-tts';
+import { detectLinuxAudioPlayer, detectLinuxTTS, type LinuxPlayer, type AudioFormat } from './linux-service/linux-audio';
+
 // Platform detection
 const IS_MACOS = platform() === 'darwin';
 const IS_LINUX = platform() === 'linux';
@@ -21,24 +25,9 @@ const IS_LINUX = platform() === 'linux';
 // Qwen3-TTS internal server port (runs alongside this server)
 const QWEN3_PORT = parseInt(process.env.QWEN3_INTERNAL_PORT || "8889");
 
-// Piper TTS configuration (Linux-only, CPU-based, fast alternative to Qwen3)
-const PAI_TTS_ENGINE = process.env.PAI_TTS_ENGINE || "qwen3"; // "piper" | "qwen3"
-const PIPER_MODEL_DIR = process.env.PIPER_MODEL_DIR || join(homedir(), '.local', 'share', 'piper-voices');
-const PIPER_DEFAULT_MODEL = process.env.PIPER_MODEL || "en_US-ryan-high";
-
 // Default voice style instruction for Qwen3-TTS (formal, consistent delivery)
 // Prevents random emotional variations like laughter or tone shifts
 const QWEN3_DEFAULT_INSTRUCT = "Speak at a brisk pace with confident energy. Professional and clear, slightly upbeat but not overly emotional. No laughter or dramatic shifts. Consistent delivery throughout. Read numbers naturally as quantities, not spelled out digit by digit.";
-
-// Linux audio player detection - format-aware
-interface LinuxPlayer {
-  name: string;
-  command: string;
-  args: string[];
-  volumeArg?: (volume: number) => string[];
-}
-
-type AudioFormat = 'mp3' | 'wav';
 
 // Audio status detection - differentiate PAI audio from other audio
 interface AudioStatus {
@@ -178,122 +167,6 @@ class AudioQueue {
 
 // Global audio queue instance
 const audioQueue = new AudioQueue();
-
-/**
- * Detect the best Linux audio player for a given format.
- * - WAV: paplay (PipeWire native) > mpv > aplay
- * - MP3: mpv > mpg123 > paplay
- */
-function detectLinuxAudioPlayer(format: AudioFormat = 'mp3'): LinuxPlayer | null {
-  if (!IS_LINUX) return null;
-
-  if (format === 'wav') {
-    // WAV: paplay is best (PulseAudio/PipeWire native, perfect for Qwen3 output)
-    try {
-      execSync('which paplay', { stdio: 'ignore' });
-      return {
-        name: 'paplay',
-        command: 'paplay',
-        args: []
-        // paplay doesn't have easy volume control
-      };
-    } catch {}
-
-    // mpv can also play WAV
-    try {
-      execSync('which mpv', { stdio: 'ignore' });
-      return {
-        name: 'mpv',
-        command: 'mpv',
-        args: ['--no-video', '--really-quiet'],
-        volumeArg: (v: number) => ['--volume=' + String(Math.round(v * 100))]
-      };
-    } catch {}
-
-    // aplay - ALSA fallback for WAV
-    try {
-      execSync('which aplay', { stdio: 'ignore' });
-      return {
-        name: 'aplay',
-        command: 'aplay',
-        args: ['-q']
-      };
-    } catch {}
-  } else {
-    // MP3: mpv preferred (handles MP3 + routes through PipeWire)
-    try {
-      execSync('which mpv', { stdio: 'ignore' });
-      return {
-        name: 'mpv',
-        command: 'mpv',
-        args: ['--no-video', '--really-quiet'],
-        volumeArg: (v: number) => ['--volume=' + String(Math.round(v * 100))]
-      };
-    } catch {}
-
-    // mpg123 for MP3
-    try {
-      execSync('which mpg123', { stdio: 'ignore' });
-      return {
-        name: 'mpg123',
-        command: 'mpg123',
-        args: ['-q'],
-        volumeArg: (v: number) => ['-f', String(Math.round(v * 32768))]
-      };
-    } catch {}
-
-    // paplay can play MP3 on newer systems
-    try {
-      execSync('which paplay', { stdio: 'ignore' });
-      return {
-        name: 'paplay',
-        command: 'paplay',
-        args: []
-      };
-    } catch {}
-  }
-
-  return null;
-}
-
-// Legacy function for backwards compatibility
-function detectLinuxAudioPlayerLegacy(): LinuxPlayer | null {
-  return detectLinuxAudioPlayer('mp3');
-}
-
-// Linux TTS fallback detection
-function detectLinuxTTS(): { command: string; args: (text: string) => string[] } | null {
-  if (!IS_LINUX) return null;
-
-  // espeak - most common Linux TTS
-  try {
-    execSync('which espeak', { stdio: 'ignore' });
-    return {
-      command: 'espeak',
-      args: (text: string) => [text]
-    };
-  } catch {}
-
-  // espeak-ng - newer espeak
-  try {
-    execSync('which espeak-ng', { stdio: 'ignore' });
-    return {
-      command: 'espeak-ng',
-      args: (text: string) => [text]
-    };
-  } catch {}
-
-  // festival - alternative TTS
-  try {
-    execSync('which festival', { stdio: 'ignore' });
-    return {
-      command: 'festival',
-      args: (text: string) => ['--tts']  // reads from stdin
-    };
-  } catch {}
-
-  return null;
-}
 
 // Cache detected players (for each format)
 const LINUX_AUDIO_PLAYER_MP3 = detectLinuxAudioPlayer('mp3');
@@ -614,92 +487,6 @@ async function checkQwen3Available(): Promise<boolean> {
   }
 
   return qwen3Available;
-}
-
-// Check if Piper TTS is available (Linux only, CLI-based)
-let piperAvailable: boolean | null = null;
-let piperBinaryPath: string | null = null;
-
-function checkPiperAvailable(): boolean {
-  if (piperAvailable !== null) return piperAvailable;
-  if (!IS_LINUX) {
-    piperAvailable = false;
-    return false;
-  }
-
-  try {
-    piperBinaryPath = execSync('which piper', { encoding: 'utf-8', timeout: 3000 }).trim();
-    // Verify the model file exists
-    const modelPath = join(PIPER_MODEL_DIR, `${PIPER_DEFAULT_MODEL}.onnx`);
-    if (!existsSync(modelPath)) {
-      console.warn(`Piper binary found but model missing: ${modelPath}`);
-      piperAvailable = false;
-      return false;
-    }
-    piperAvailable = true;
-  } catch {
-    piperAvailable = false;
-  }
-
-  return piperAvailable;
-}
-
-/**
- * Generate speech using Piper TTS (local, CPU-based, fast).
- *
- * Pipes text to piper CLI stdin, reads WAV output file.
- * Output: WAV (sample rate depends on model, typically 22050 Hz).
- * No progressive playback needed — Piper generates fast enough for full text.
- */
-async function generateSpeechPiper(text: string): Promise<ArrayBuffer> {
-  if (!piperBinaryPath) {
-    throw new Error('Piper TTS binary not found');
-  }
-
-  const modelPath = join(PIPER_MODEL_DIR, `${PIPER_DEFAULT_MODEL}.onnx`);
-  const outputFile = `/tmp/voice-piper-${Date.now()}.wav`;
-  const startTime = Date.now();
-
-  return new Promise((resolve, reject) => {
-    const args = [
-      '-m', modelPath,
-      '-f', outputFile,
-      '-q', // quiet mode
-    ];
-
-    const proc = spawn(piperBinaryPath!, args);
-
-    let stderr = '';
-    proc.stderr?.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString();
-    });
-
-    proc.on('error', (error) => {
-      reject(new Error(`Piper spawn error: ${error.message}`));
-    });
-
-    proc.on('exit', async (code) => {
-      if (code !== 0) {
-        reject(new Error(`Piper exited with code ${code}: ${stderr}`));
-        return;
-      }
-
-      try {
-        const file = Bun.file(outputFile);
-        const buffer = await file.arrayBuffer();
-        spawn('/bin/rm', ['-f', outputFile]);
-        const elapsed = Date.now() - startTime;
-        console.log(`Piper TTS: Generated ${(buffer.byteLength / 1024).toFixed(1)}KB in ${elapsed}ms`);
-        resolve(buffer);
-      } catch (err) {
-        reject(new Error(`Failed to read Piper output: ${err}`));
-      }
-    });
-
-    // Write text to stdin and close
-    proc.stdin?.write(text);
-    proc.stdin?.end();
-  });
 }
 
 // Generate speech using Qwen3-TTS (local fallback)
@@ -1300,7 +1087,7 @@ async function logStartup() {
   }
 
   console.log(`TTS Engine: ${ttsDescription}`);
-  console.log(`Piper TTS: ${checkPiperAvailable() ? `available (${piperBinaryPath})` : 'not found'}`);
+  console.log(`Piper TTS: ${checkPiperAvailable() ? 'available' : 'not found'}`);
   console.log(`Default voice: ${DEFAULT_VOICE_ID || '(none configured)'}`);
   console.log(`POST to http://localhost:${PORT}/notify`);
   console.log(`Security: CORS restricted to localhost, rate limiting enabled`);
