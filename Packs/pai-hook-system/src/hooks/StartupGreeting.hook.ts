@@ -98,42 +98,39 @@ async function sendVoiceGreeting(settings: Record<string, unknown>): Promise<voi
   }
 }
 
-(async () => {
-  try {
-    const settings = JSON.parse(readFileSync(settingsPath, 'utf-8'));
+try {
+  const settings = JSON.parse(readFileSync(settingsPath, 'utf-8'));
 
-    // Check if this is a subagent session - if so, exit silently
-    const claudeProjectDir = process.env.CLAUDE_PROJECT_DIR || '';
-    const isSubagent = claudeProjectDir.includes('/.claude/Agents/') ||
-                      process.env.CLAUDE_AGENT_TYPE !== undefined;
+  // Check if this is a subagent session - if so, exit silently
+  const claudeProjectDir = process.env.CLAUDE_PROJECT_DIR || '';
+  const isSubagent = claudeProjectDir.includes('/.claude/Agents/') ||
+                    process.env.CLAUDE_AGENT_TYPE !== undefined;
 
-    if (isSubagent) {
-      process.exit(0);
-    }
-
-    // Run the banner tool
-    const bannerPath = join(paiDir, 'skills/CORE/Tools/Banner.ts');
-    const result = spawnSync('bun', ['run', bannerPath], {
-      encoding: 'utf-8',
-      stdio: ['inherit', 'pipe', 'pipe'],
-      env: {
-        ...process.env,
-        // Pass through terminal detection env vars
-        COLUMNS: process.env.COLUMNS,
-        KITTY_WINDOW_ID: process.env.KITTY_WINDOW_ID,
-      }
-    });
-
-    if (result.stdout) {
-      console.log(result.stdout);
-    }
-
-    // Send voice greeting (fire-and-forget, skipped if reducedVoiceFeedback)
-    sendVoiceGreeting(settings).catch(() => {});
-
+  if (isSubagent) {
     process.exit(0);
-  } catch (error) {
-    console.error('StartupGreeting: Failed to display banner', error);
-    process.exit(1);
   }
-})();
+
+  // Run the banner tool
+  const bannerPath = join(paiDir, 'skills/CORE/Tools/Banner.ts');
+  const result = spawnSync('bun', ['run', bannerPath], {
+    encoding: 'utf-8',
+    stdio: ['inherit', 'pipe', 'pipe'],
+    env: {
+      ...process.env,
+      COLUMNS: process.env.COLUMNS,
+      KITTY_WINDOW_ID: process.env.KITTY_WINDOW_ID,
+    }
+  });
+
+  if (result.stdout) {
+    console.log(result.stdout);
+  }
+
+  // Send voice greeting (fire-and-forget, skipped if reducedVoiceFeedback)
+  sendVoiceGreeting(settings).catch(() => {});
+
+  process.exit(0);
+} catch (error) {
+  console.error('StartupGreeting: Failed to display banner', error);
+  process.exit(1);
+}
