@@ -11,7 +11,6 @@
  *
  * INPUT:
  * - Environment: COLUMNS, KITTY_WINDOW_ID for terminal detection
- * - Settings: settings.json for identity configuration
  *
  * OUTPUT:
  * - stdout: Banner display (captured by Claude Code)
@@ -21,7 +20,6 @@
  *
  * SIDE EFFECTS:
  * - Spawns Banner.ts tool as child process
- * - Reads settings.json for configuration
  *
  * INTER-HOOK RELATIONSHIPS:
  * - DEPENDS ON: None (runs independently at session start)
@@ -30,7 +28,6 @@
  * - MUST RUN AFTER: None
  *
  * ERROR HANDLING:
- * - Missing settings: Error logged, exits with error code
  * - Banner tool failure: Error logged, exits with error code
  *
  * PERFORMANCE:
@@ -45,17 +42,14 @@
  * - normal (85+ cols): Full neofetch-style
  */
 
-import { readFileSync } from 'fs';
 import { join } from 'path';
 import { spawnSync } from 'child_process';
 
-import { getPaiDir, getSettingsPath } from './lib/paths';
+import { getPaiDir } from './lib/paths';
 
 const paiDir = getPaiDir();
-const settingsPath = getSettingsPath();
 
 try {
-  const settings = JSON.parse(readFileSync(settingsPath, 'utf-8'));
 
   // Check if this is a subagent session - if so, exit silently
   const claudeProjectDir = process.env.CLAUDE_PROJECT_DIR || '';
@@ -73,7 +67,6 @@ try {
     stdio: ['inherit', 'pipe', 'pipe'],
     env: {
       ...process.env,
-      // Pass through terminal detection env vars
       COLUMNS: process.env.COLUMNS,
       KITTY_WINDOW_ID: process.env.KITTY_WINDOW_ID,
     }

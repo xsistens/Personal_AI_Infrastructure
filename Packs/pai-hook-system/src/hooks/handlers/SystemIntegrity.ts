@@ -8,7 +8,7 @@
  *
  * SIDE EFFECTS:
  * - Spawns background IntegrityMaintenance.ts process
- * - Voice notification on start
+ * - Voice notification on start (unless reducedVoiceFeedback is enabled)
  * - Updates MEMORY/STATE/integrity-state.json
  *
  * THROTTLING:
@@ -20,6 +20,10 @@ import { writeFileSync, mkdirSync, existsSync } from 'fs';
 import { spawn } from 'child_process';
 import { join } from 'path';
 import { paiPath } from '../lib/paths';
+import { isReducedVoiceFeedback } from '../lib/identity';
+
+const DEBUG = process.env.DEBUG_HOOKS === 'true';
+
 import {
   parseToolUseBlocks,
   isSignificantChange,
@@ -47,9 +51,16 @@ const INTEGRITY_SCRIPT = paiPath('tools', 'IntegrityMaintenance.ts');
 /**
  * Send voice notification for integrity check start.
  * Fire-and-forget - doesn't block.
+ * Skipped when reducedVoiceFeedback is enabled.
  * Includes 4-second delay to let main voice handler finish speaking first.
  */
 async function notifyIntegrityStart(): Promise<void> {
+  // Skip if reduced voice feedback is enabled
+  if (isReducedVoiceFeedback()) {
+    if (DEBUG) console.error('[SystemIntegrity] Skipping voice (reducedVoiceFeedback enabled)');
+    return;
+  }
+
   try {
     // Wait 4 seconds for main voice handler to finish speaking
     await new Promise(resolve => setTimeout(resolve, 4000));
@@ -84,9 +95,9 @@ function updateIntegrityState(changes: FileChange[]): void {
     };
 
     writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
-    console.error('[SystemIntegrity] Updated state file');
+    if (DEBUG) console.error('[SystemIntegrity] Updated state file');
   } catch (error) {
-    console.error('[SystemIntegrity] Failed to update state:', error);
+    console.error('[SystemIntegrity] Failed to update state:', error); // Always log errors
   }
 }
 
@@ -100,7 +111,7 @@ function spawnIntegrityMaintenance(
   try {
     // Check if script exists
     if (!existsSync(INTEGRITY_SCRIPT)) {
-      console.error('[SystemIntegrity] IntegrityMaintenance.ts not found:', INTEGRITY_SCRIPT);
+      if (DEBUG) console.error('[SystemIntegrity] IntegrityMaintenance.ts not found:', INTEGRITY_SCRIPT);
       return;
     }
 
@@ -110,9 +121,11 @@ function spawnIntegrityMaintenance(
     const significance = determineSignificance(filteredChanges);
     const changeType = inferChangeType(filteredChanges);
 
-    console.error(`[SystemIntegrity] Title: ${title}`);
-    console.error(`[SystemIntegrity] Significance: ${significance}`);
-    console.error(`[SystemIntegrity] Change type: ${changeType}`);
+    if (DEBUG) {
+      console.error(`[SystemIntegrity] Title: ${title}`);
+      console.error(`[SystemIntegrity] Significance: ${significance}`);
+      console.error(`[SystemIntegrity] Change type: ${changeType}`);
+    }
 
     // Prepare input data
     const inputData = JSON.stringify({
@@ -141,9 +154,9 @@ function spawnIntegrityMaintenance(
     // Detach from parent
     child.unref();
 
-    console.error(`[SystemIntegrity] Spawned IntegrityMaintenance (pid: ${child.pid})`);
+    if (DEBUG) console.error(`[SystemIntegrity] Spawned IntegrityMaintenance (pid: ${child.pid})`);
   } catch (error) {
-    console.error('[SystemIntegrity] Failed to spawn IntegrityMaintenance:', error);
+    console.error('[SystemIntegrity] Failed to spawn IntegrityMaintenance:', error); // Always log errors
   }
 }
 
@@ -160,56 +173,58 @@ export async function handleSystemIntegrity(
   parsed: ParsedTranscript,
   hookInput: HookInput
 ): Promise<void> {
-  console.error('[SystemIntegrity] Checking for system changes...');
+  if (DEBUG) console.error('[SystemIntegrity] Checking for system changes...');
 
   // Check cooldown
   if (isInCooldown()) {
-    console.error('[SystemIntegrity] In cooldown period, skipping');
+    if (DEBUG) console.error('[SystemIntegrity] In cooldown period, skipping');
     return;
   }
 
   // Parse changes from transcript
   const changes = parseToolUseBlocks(hookInput.transcript_path);
-  console.error(`[SystemIntegrity] Found ${changes.length} file changes in transcript`);
+  if (DEBUG) console.error(`[SystemIntegrity] Found ${changes.length} file changes in transcript`);
 
   // Filter to only PAI system changes
   const systemChanges = changes.filter(c => c.category !== null);
-  console.error(`[SystemIntegrity] ${systemChanges.length} are PAI system changes`);
+  if (DEBUG) console.error(`[SystemIntegrity] ${systemChanges.length} are PAI system changes`);
 
   if (systemChanges.length === 0) {
-    console.error('[SystemIntegrity] No system changes detected, skipping');
+    if (DEBUG) console.error('[SystemIntegrity] No system changes detected, skipping');
     return;
   }
 
   // Check if significant
   if (!isSignificantChange(systemChanges)) {
-    console.error('[SystemIntegrity] Changes not significant enough, skipping');
+    if (DEBUG) console.error('[SystemIntegrity] Changes not significant enough, skipping');
     return;
   }
 
   // Check for duplicate run
   if (isDuplicateRun(changes)) {
-    console.error('[SystemIntegrity] Duplicate change set, skipping');
+    if (DEBUG) console.error('[SystemIntegrity] Duplicate change set, skipping');
     return;
   }
 
   // Log what we found
-  console.error('[SystemIntegrity] Significant changes detected:');
-  for (const change of systemChanges.slice(0, 5)) {
-    console.error(`  - [${change.category}] ${change.path}`);
-  }
-  if (systemChanges.length > 5) {
-    console.error(`  ... and ${systemChanges.length - 5} more`);
+  if (DEBUG) {
+    console.error('[SystemIntegrity] Significant changes detected:');
+    for (const change of systemChanges.slice(0, 5)) {
+      console.error(`  - [${change.category}] ${change.path}`);
+    }
+    if (systemChanges.length > 5) {
+      console.error(`  ... and ${systemChanges.length - 5} more`);
+    }
   }
 
   // Update state before spawning
   updateIntegrityState(systemChanges);
 
-  // Send voice notification (fire-and-forget)
+  // Send voice notification (fire-and-forget, skipped if reducedVoiceFeedback)
   notifyIntegrityStart().catch(() => {});
 
   // Spawn background process
   spawnIntegrityMaintenance(systemChanges, hookInput);
 
-  console.error('[SystemIntegrity] Background integrity check started');
+  if (DEBUG) console.error('[SystemIntegrity] Background integrity check started');
 }
