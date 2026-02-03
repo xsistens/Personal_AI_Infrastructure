@@ -1,13 +1,311 @@
 #!/usr/bin/env bun
 /**
- * Voice Server - Personal AI Voice notification server using ElevenLabs TTS
+ * Voice Server - Personal AI Voice notification server
+ *
+ * TTS Engines:
+ * - ElevenLabs (cloud) when API key available → MP3 → mpv/mpg123
+ * - Qwen3-TTS (local) when no API key → WAV → paplay
  */
 
 import { serve } from "bun";
-import { spawn } from "child_process";
-import { homedir } from "os";
+import { spawn, execSync } from "child_process";
+import { homedir, platform } from "os";
 import { join } from "path";
 import { existsSync, readFileSync } from "fs";
+
+// Platform detection
+const IS_MACOS = platform() === 'darwin';
+const IS_LINUX = platform() === 'linux';
+
+// Verbose logging - only enabled via environment variable
+// Startup/init logs are always shown; per-request processing logs require this flag
+const VOICE_DEBUG = process.env.VOICE_DEBUG === 'true';
+
+// Qwen3-TTS internal server port (runs alongside this server)
+const QWEN3_PORT = parseInt(process.env.QWEN3_INTERNAL_PORT || "8889");
+
+// Default voice style instruction for Qwen3-TTS (formal, consistent delivery)
+// Prevents random emotional variations like laughter or tone shifts
+const QWEN3_DEFAULT_INSTRUCT = "Speak at a brisk pace with confident energy. Professional and clear, slightly upbeat but not overly emotional. No laughter or dramatic shifts. Consistent delivery throughout. Read numbers naturally as quantities, not spelled out digit by digit.";
+
+// Linux audio player detection - format-aware
+interface LinuxPlayer {
+  name: string;
+  command: string;
+  args: string[];
+  volumeArg?: (volume: number) => string[];
+}
+
+type AudioFormat = 'mp3' | 'wav';
+
+// Audio status detection - differentiate PAI audio from other audio
+interface AudioStatus {
+  paiAudioPlaying: boolean;
+  otherAudioPlaying: boolean;
+}
+
+/**
+ * Check what audio is currently playing on the system.
+ * Differentiates between PAI voice notifications and other audio.
+ *
+ * PAI audio is identified by: application.name = "paplay" AND media.name contains /tmp/voice-*.wav
+ * This allows us to queue PAI notifications while skipping when other audio (YouTube, music) is playing.
+ */
+function checkAudioStatus(): AudioStatus {
+  if (!IS_LINUX) {
+    return { paiAudioPlaying: false, otherAudioPlaying: false };
+  }
+
+  try {
+    const result = execSync('pactl list sink-inputs 2>/dev/null', {
+      encoding: 'utf-8',
+      timeout: 2000,
+    });
+
+    if (!result.trim()) {
+      return { paiAudioPlaying: false, otherAudioPlaying: false };
+    }
+
+    // Parse sink-inputs into individual entries
+    const entries = result.split('Sink Input #').filter(e => e.trim());
+
+    let paiAudioPlaying = false;
+    let otherAudioPlaying = false;
+
+    for (const entry of entries) {
+      // Check if this is PAI audio: paplay playing our voice temp file
+      const isPaplay = entry.includes('application.name = "paplay"');
+      const isVoiceFile = /media\.name = "[^"]*\/tmp\/voice-[^"]*\.wav"/.test(entry);
+
+      if (isPaplay && isVoiceFile) {
+        paiAudioPlaying = true;
+      } else if (entry.includes('application.name')) {
+        // Has an application name but isn't PAI audio
+        otherAudioPlaying = true;
+      }
+    }
+
+    return { paiAudioPlaying, otherAudioPlaying };
+  } catch {
+    // If pactl fails, assume no audio playing (fail open)
+    return { paiAudioPlaying: false, otherAudioPlaying: false };
+  }
+}
+
+// ============================================================================
+// Audio Queue - Non-blocking notification processing
+// ============================================================================
+
+interface QueuedNotification {
+  title: string;
+  message: string;
+  voiceEnabled: boolean;
+  voiceId: string | null;
+  prosody?: any;
+  resolve: () => void;
+  reject: (error: Error) => void;
+}
+
+/**
+ * Audio queue for serialized, non-blocking notification playback.
+ *
+ * Instead of polling to wait for previous audio to finish, notifications
+ * are queued and processed sequentially. The HTTP handler returns immediately
+ * while audio plays in the background.
+ */
+class AudioQueue {
+  private queue: QueuedNotification[] = [];
+  private isProcessing = false;
+
+  get length(): number {
+    return this.queue.length;
+  }
+
+  get processing(): boolean {
+    return this.isProcessing;
+  }
+
+  /**
+   * Add a notification to the queue. Returns a promise that resolves
+   * when the notification has been fully processed (TTS + playback complete).
+   */
+  enqueue(notification: Omit<QueuedNotification, 'resolve' | 'reject'>): Promise<void> {
+    return new Promise((resolve, reject) => {
+      this.queue.push({ ...notification, resolve, reject });
+      this.processQueue(); // Start processing (non-blocking)
+    });
+  }
+
+  /**
+   * Process queued notifications sequentially.
+   * Only one notification plays at a time - no polling needed.
+   */
+  private async processQueue(): Promise<void> {
+    if (this.isProcessing) return; // Already running
+    this.isProcessing = true;
+
+    while (this.queue.length > 0) {
+      const notification = this.queue.shift()!;
+
+      try {
+        // Check for other audio (YouTube, etc.) - skip if playing
+        const audioStatus = checkAudioStatus();
+        if (audioStatus.otherAudioPlaying) {
+          if (VOICE_DEBUG) console.log('Voice skipped: other audio currently playing');
+          notification.resolve(); // Resolve without playing
+          continue;
+        }
+
+        // Process notification (TTS + playback)
+        // playAudio() already waits for process exit - no polling needed
+        await processNotificationVoice(
+          notification.message,
+          notification.voiceId,
+          notification.prosody
+        );
+        notification.resolve();
+      } catch (error) {
+        if (VOICE_DEBUG) console.error('Queue processing error:', error);
+        notification.reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    }
+
+    this.isProcessing = false;
+  }
+}
+
+// Global audio queue instance
+const audioQueue = new AudioQueue();
+
+/**
+ * Detect the best Linux audio player for a given format.
+ * - WAV: paplay (PipeWire native) > mpv > aplay
+ * - MP3: mpv > mpg123 > paplay
+ */
+function detectLinuxAudioPlayer(format: AudioFormat = 'mp3'): LinuxPlayer | null {
+  if (!IS_LINUX) return null;
+
+  if (format === 'wav') {
+    // WAV: paplay is best (PulseAudio/PipeWire native, perfect for Qwen3 output)
+    try {
+      execSync('which paplay', { stdio: 'ignore' });
+      return {
+        name: 'paplay',
+        command: 'paplay',
+        args: []
+        // paplay doesn't have easy volume control
+      };
+    } catch {}
+
+    // mpv can also play WAV
+    try {
+      execSync('which mpv', { stdio: 'ignore' });
+      return {
+        name: 'mpv',
+        command: 'mpv',
+        args: ['--no-video', '--really-quiet'],
+        volumeArg: (v: number) => ['--volume=' + String(Math.round(v * 100))]
+      };
+    } catch {}
+
+    // aplay - ALSA fallback for WAV
+    try {
+      execSync('which aplay', { stdio: 'ignore' });
+      return {
+        name: 'aplay',
+        command: 'aplay',
+        args: ['-q']
+      };
+    } catch {}
+  } else {
+    // MP3: mpv preferred (handles MP3 + routes through PipeWire)
+    try {
+      execSync('which mpv', { stdio: 'ignore' });
+      return {
+        name: 'mpv',
+        command: 'mpv',
+        args: ['--no-video', '--really-quiet'],
+        volumeArg: (v: number) => ['--volume=' + String(Math.round(v * 100))]
+      };
+    } catch {}
+
+    // mpg123 for MP3
+    try {
+      execSync('which mpg123', { stdio: 'ignore' });
+      return {
+        name: 'mpg123',
+        command: 'mpg123',
+        args: ['-q'],
+        volumeArg: (v: number) => ['-f', String(Math.round(v * 32768))]
+      };
+    } catch {}
+
+    // paplay can play MP3 on newer systems
+    try {
+      execSync('which paplay', { stdio: 'ignore' });
+      return {
+        name: 'paplay',
+        command: 'paplay',
+        args: []
+      };
+    } catch {}
+  }
+
+  return null;
+}
+
+// Legacy function for backwards compatibility
+function detectLinuxAudioPlayerLegacy(): LinuxPlayer | null {
+  return detectLinuxAudioPlayer('mp3');
+}
+
+// Linux TTS fallback detection
+function detectLinuxTTS(): { command: string; args: (text: string) => string[] } | null {
+  if (!IS_LINUX) return null;
+
+  // espeak - most common Linux TTS
+  try {
+    execSync('which espeak', { stdio: 'ignore' });
+    return {
+      command: 'espeak',
+      args: (text: string) => [text]
+    };
+  } catch {}
+
+  // espeak-ng - newer espeak
+  try {
+    execSync('which espeak-ng', { stdio: 'ignore' });
+    return {
+      command: 'espeak-ng',
+      args: (text: string) => [text]
+    };
+  } catch {}
+
+  // festival - alternative TTS
+  try {
+    execSync('which festival', { stdio: 'ignore' });
+    return {
+      command: 'festival',
+      args: (text: string) => ['--tts']  // reads from stdin
+    };
+  } catch {}
+
+  return null;
+}
+
+// Cache detected players (for each format)
+const LINUX_AUDIO_PLAYER_MP3 = detectLinuxAudioPlayer('mp3');
+const LINUX_AUDIO_PLAYER_WAV = detectLinuxAudioPlayer('wav');
+const LINUX_TTS = detectLinuxTTS();
+
+if (IS_LINUX) {
+  console.log(`Platform: Linux`);
+  console.log(`Audio player (MP3): ${LINUX_AUDIO_PLAYER_MP3?.name || 'none found'}`);
+  console.log(`Audio player (WAV): ${LINUX_AUDIO_PLAYER_WAV?.name || 'none found'}`);
+  console.log(`TTS fallback: ${LINUX_TTS?.command || 'none found (install espeak or espeak-ng)'}`);
+} else if (IS_MACOS) {
+  console.log(`Platform: macOS`);
+}
 
 // Load .env from user home directory
 const envPath = join(homedir(), '.env');
@@ -137,9 +435,45 @@ try {
   console.warn('Failed to load pronunciation customizations');
 }
 
+// Sanitize text for TTS: strip URL protocols, clean up for natural speech
+function sanitizeForTTS(text: string): string {
+  let result = text;
+
+  // Strip URL protocols only (keep domain and path for reading)
+  // "https://github.com/repo" -> "github.com/repo"
+  result = result.replace(/https?:\/\//gi, '');
+
+  // Remove markdown links but keep the text: [text](url) -> text
+  result = result.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+
+  // Clean up multiple spaces and trim
+  result = result.replace(/\s+/g, ' ').trim();
+
+  return result;
+}
+
+// Split text into sentences for progressive TTS
+// Returns array of sentences, preserving punctuation
+function splitIntoSentences(text: string): string[] {
+  // Split on sentence-ending punctuation followed by space or end
+  // Handles: . ! ? and also keeps the punctuation with the sentence
+  const sentences = text.match(/[^.!?]+[.!?]+(?:\s|$)|[^.!?]+$/g);
+
+  if (!sentences) {
+    return [text]; // Fallback: return whole text as one "sentence"
+  }
+
+  return sentences
+    .map(s => s.trim())
+    .filter(s => s.length > 0);
+}
+
 // Apply pronunciation substitutions to text before TTS
 function applyPronunciations(text: string): string {
-  let result = text;
+  // First sanitize for TTS (remove URLs, etc.)
+  let result = sanitizeForTTS(text);
+
+  // Then apply custom pronunciations
   for (const [term, pronunciation] of Object.entries(pronunciations)) {
     // Case-insensitive replacement with word boundaries
     const regex = new RegExp(`\\b${term}\\b`, 'gi');
@@ -262,6 +596,171 @@ async function generateSpeech(
   return await response.arrayBuffer();
 }
 
+// Check if Qwen3-TTS internal server is available
+let qwen3Available: boolean | null = null;
+
+async function checkQwen3Available(): Promise<boolean> {
+  if (qwen3Available !== null) return qwen3Available;
+
+  try {
+    const response = await fetch(`http://127.0.0.1:${QWEN3_PORT}/health`, {
+      signal: AbortSignal.timeout(2000)
+    });
+    qwen3Available = response.ok;
+  } catch {
+    qwen3Available = false;
+  }
+
+  return qwen3Available;
+}
+
+// Generate speech using Qwen3-TTS (local fallback)
+async function generateSpeechQwen3(
+  text: string,
+  speaker: string = "Ryan",
+  instruct?: string
+): Promise<ArrayBuffer> {
+  const response = await fetch(`http://127.0.0.1:${QWEN3_PORT}/tts/generate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      text,
+      speaker,
+      instruct,
+      language: "en"
+    }),
+    signal: AbortSignal.timeout(60000) // 60s timeout for TTS generation
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Qwen3-TTS error: ${response.status} - ${errorText}`);
+  }
+
+  return await response.arrayBuffer();
+}
+
+/**
+ * Progressive TTS playback for Qwen3-TTS.
+ *
+ * Splits text into sentences and plays progressively:
+ * 1. Generate first sentence → start playing immediately
+ * 2. While playing, generate next sentence in parallel
+ * 3. Queue and play sequentially
+ *
+ * This reduces perceived latency from ~10-15s to ~3-4s (first sentence delay only).
+ */
+async function playQwen3Progressive(
+  text: string,
+  speaker: string = "Ryan",
+  instruct?: string
+): Promise<void> {
+  const sentences = splitIntoSentences(text);
+  const startTime = Date.now();
+
+  // For single sentence or short text, use normal flow
+  if (sentences.length <= 1) {
+    const audioBuffer = await generateSpeechQwen3(text, speaker, instruct);
+    await playAudio(audioBuffer, 'wav');
+    if (VOICE_DEBUG) console.log(`Qwen3-TTS: Completed in ${Date.now() - startTime}ms (single)`);
+    return;
+  }
+
+  // Track audio buffers and playback state
+  let currentIndex = 0;
+  let isPlaying = false;
+  const audioQueue: ArrayBuffer[] = [];
+  let generationComplete = false;
+  let playbackComplete = false;
+  let firstAudioTime = 0; // Time to first audio playback
+
+  // Promise to track when everything is done
+  const done = new Promise<void>((resolve, reject) => {
+    // Start generation of all sentences (with slight stagger to prioritize first)
+    const generateAll = async () => {
+      for (let i = 0; i < sentences.length; i++) {
+        try {
+          const buffer = await generateSpeechQwen3(sentences[i], speaker, instruct);
+          audioQueue[i] = buffer;
+
+          // Trigger playback check after each generation
+          // - For sentence 0: starts initial playback
+          // - For subsequent: resumes if playback was waiting for this sentence
+          if (!isPlaying) {
+            playNext();
+          }
+        } catch (error) {
+          if (VOICE_DEBUG) console.error(`Qwen3-TTS: Failed to generate sentence ${i + 1}:`, error);
+          // Put empty buffer to maintain order
+          audioQueue[i] = new ArrayBuffer(0);
+        }
+      }
+      generationComplete = true;
+      // If playback finished waiting for generation, check completion
+      checkComplete();
+    };
+
+    // Play audio chunks sequentially
+    const playNext = async () => {
+      if (isPlaying) return; // Already playing
+
+      // Check if next chunk is ready
+      if (audioQueue[currentIndex] === undefined) {
+        // Not ready yet, will be triggered when generation adds it
+        return;
+      }
+
+      const buffer = audioQueue[currentIndex];
+      if (buffer.byteLength === 0) {
+        // Empty buffer (generation failed), skip
+        currentIndex++;
+        if (currentIndex < sentences.length) {
+          playNext();
+        } else {
+          playbackComplete = true;
+          checkComplete();
+        }
+        return;
+      }
+
+      isPlaying = true;
+      if (currentIndex === 0) {
+        firstAudioTime = Date.now() - startTime;
+      }
+
+      try {
+        await playAudio(buffer, 'wav');
+      } catch (error) {
+        if (VOICE_DEBUG) console.error(`Qwen3-TTS: Playback error:`, error);
+      }
+
+      isPlaying = false;
+      currentIndex++;
+
+      if (currentIndex < sentences.length) {
+        // More to play
+        playNext();
+      } else {
+        playbackComplete = true;
+        checkComplete();
+      }
+    };
+
+    const checkComplete = () => {
+      if (generationComplete && playbackComplete) {
+        resolve();
+      }
+    };
+
+    // Start generation
+    generateAll().catch(reject);
+  });
+
+  await done;
+  const totalTime = Date.now() - startTime;
+  if (VOICE_DEBUG) console.log(`Qwen3-TTS: ${sentences.length} sentences, first-audio: ${firstAudioTime}ms, total: ${totalTime}ms`);
+}
+
 // Get volume setting from DA config or request (defaults to 1.0 = 100%)
 function getVolumeSetting(requestVolume?: number): number {
   // Request volume takes priority
@@ -275,44 +774,92 @@ function getVolumeSetting(requestVolume?: number): number {
   return 1.0; // Default to full volume
 }
 
-// Play audio using afplay (macOS)
-async function playAudio(audioBuffer: ArrayBuffer, requestVolume?: number): Promise<void> {
-  const tempFile = `/tmp/voice-${Date.now()}.mp3`;
+// Play audio using platform-appropriate player (format-aware)
+async function playAudio(
+  audioBuffer: ArrayBuffer,
+  format: AudioFormat = 'mp3',
+  requestVolume?: number
+): Promise<void> {
+  const extension = format === 'wav' ? 'wav' : 'mp3';
+  const tempFile = `/tmp/voice-${Date.now()}.${extension}`;
 
   // Write audio to temp file
   await Bun.write(tempFile, audioBuffer);
 
   const volume = getVolumeSetting(requestVolume);
 
+  // Select the appropriate player for the format
+  const linuxPlayer = format === 'wav' ? LINUX_AUDIO_PLAYER_WAV : LINUX_AUDIO_PLAYER_MP3;
+
   return new Promise((resolve, reject) => {
-    // afplay -v takes a value from 0.0 to 1.0
-    const proc = spawn('/usr/bin/afplay', ['-v', volume.toString(), tempFile]);
+    let proc;
+
+    if (IS_MACOS) {
+      // macOS: afplay handles both MP3 and WAV
+      proc = spawn('/usr/bin/afplay', ['-v', volume.toString(), tempFile]);
+    } else if (IS_LINUX && linuxPlayer) {
+      // Linux: use format-appropriate audio player
+      const args = [...linuxPlayer.args];
+      if (linuxPlayer.volumeArg) {
+        args.push(...linuxPlayer.volumeArg(volume));
+      }
+      args.push(tempFile);
+      if (VOICE_DEBUG) console.log(`Playing ${format} with ${linuxPlayer.name}`);
+      proc = spawn(linuxPlayer.command, args);
+    } else {
+      // Cleanup and fail
+      spawn('/bin/rm', ['-f', tempFile]);
+      reject(new Error(`No audio player available for ${format} on this platform`));
+      return;
+    }
 
     proc.on('error', (error) => {
-      console.error('Error playing audio:', error);
+      if (VOICE_DEBUG) console.error('Error playing audio:', error);
+      spawn('/bin/rm', ['-f', tempFile]);
       reject(error);
     });
 
     proc.on('exit', (code) => {
       // Clean up temp file
-      spawn('/bin/rm', [tempFile]);
+      spawn('/bin/rm', ['-f', tempFile]);
 
       if (code === 0) {
         resolve();
       } else {
-        reject(new Error(`afplay exited with code ${code}`));
+        const player = IS_MACOS ? 'afplay' : linuxPlayer?.name || 'unknown';
+        reject(new Error(`${player} exited with code ${code}`));
       }
     });
   });
 }
 
-// Use macOS say command as fallback
+// Use platform-appropriate TTS command as fallback
 async function speakWithSay(text: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    const proc = spawn('/usr/bin/say', [text]);
+    let proc;
+
+    if (IS_MACOS) {
+      // macOS: use built-in say command
+      proc = spawn('/usr/bin/say', [text]);
+    } else if (IS_LINUX && LINUX_TTS) {
+      // Linux: use detected TTS (espeak, espeak-ng, or festival)
+      if (LINUX_TTS.command === 'festival') {
+        // Festival reads from stdin
+        proc = spawn(LINUX_TTS.command, ['--tts']);
+        proc.stdin?.write(text);
+        proc.stdin?.end();
+      } else {
+        // espeak/espeak-ng take text as argument
+        proc = spawn(LINUX_TTS.command, LINUX_TTS.args(text));
+      }
+    } else {
+      if (VOICE_DEBUG) console.warn('No TTS fallback available for this platform');
+      resolve(); // Silently succeed - TTS fallback is optional
+      return;
+    }
 
     proc.on('error', (error) => {
-      console.error('Error with say command:', error);
+      if (VOICE_DEBUG) console.error('Error with TTS command:', error);
       reject(error);
     });
 
@@ -320,7 +867,8 @@ async function speakWithSay(text: string): Promise<void> {
       if (code === 0) {
         resolve();
       } else {
-        reject(new Error(`say exited with code ${code}`));
+        const tts = IS_MACOS ? 'say' : LINUX_TTS?.command || 'unknown';
+        reject(new Error(`${tts} exited with code ${code}`));
       }
     });
   });
@@ -332,7 +880,7 @@ function spawnSafe(command: string, args: string[]): Promise<void> {
     const proc = spawn(command, args);
 
     proc.on('error', (error) => {
-      console.error(`Error spawning ${command}:`, error);
+      if (VOICE_DEBUG) console.error(`Error spawning ${command}:`, error);
       reject(error);
     });
 
@@ -346,7 +894,74 @@ function spawnSafe(command: string, args: string[]): Promise<void> {
   });
 }
 
-// Send macOS notification with voice
+/**
+ * Process voice for a notification (TTS generation + playback).
+ * Called by the AudioQueue worker - no polling needed, queue handles serialization.
+ */
+async function processNotificationVoice(
+  message: string,
+  voiceId: string | null = null,
+  requestProsody?: Partial<ProsodySettings>
+): Promise<void> {
+  const safeMessage = stripMarkers(message);
+
+  try {
+    if (ELEVENLABS_API_KEY) {
+      // ElevenLabs (cloud TTS) → MP3
+      const voice = voiceId || DEFAULT_VOICE_ID;
+      const voiceConfig = getVoiceConfig(voice);
+
+      let prosody: Partial<ProsodySettings> = {};
+
+      if (voiceConfig) {
+        if (voiceConfig.prosody) {
+          prosody = voiceConfig.prosody;
+        } else {
+          prosody = {
+            stability: voiceConfig.stability,
+            similarity_boost: voiceConfig.similarity_boost,
+            style: voiceConfig.style ?? DEFAULT_PROSODY.style,
+            speed: voiceConfig.speed ?? DEFAULT_PROSODY.speed,
+            use_speaker_boost: voiceConfig.use_speaker_boost ?? DEFAULT_PROSODY.use_speaker_boost,
+          };
+        }
+        if (VOICE_DEBUG) console.log(`Voice: ${voiceConfig.description}`);
+      } else if (voice === DEFAULT_VOICE_ID && daVoiceProsody) {
+        prosody = daVoiceProsody;
+        if (VOICE_DEBUG) console.log(`Voice: DA default`);
+      }
+
+      if (requestProsody) {
+        prosody = { ...prosody, ...requestProsody };
+      }
+
+      const settings = { ...DEFAULT_PROSODY, ...prosody };
+      const volume = (prosody as any)?.volume ?? daVoiceProsody?.volume;
+      if (VOICE_DEBUG) console.log(`Generating speech [ElevenLabs] (voice: ${voice}, stability: ${settings.stability}, style: ${settings.style}, speed: ${settings.speed}, volume: ${volume ?? 1.0})`);
+
+      const spokenMessage = applyPronunciations(safeMessage);
+      const audioBuffer = await generateSpeech(spokenMessage, voice, prosody);
+      await playAudio(audioBuffer, 'mp3', volume);
+    } else if (await checkQwen3Available()) {
+      // Qwen3-TTS with progressive sentence playback
+      const spokenMessage = applyPronunciations(safeMessage);
+      await playQwen3Progressive(spokenMessage, "Ryan", QWEN3_DEFAULT_INSTRUCT);
+    } else {
+      // Ultimate fallback to OS TTS
+      if (VOICE_DEBUG) console.log('Using OS TTS fallback (no API key, Qwen3 unavailable)');
+      await speakWithSay(applyPronunciations(safeMessage));
+    }
+  } catch (error) {
+    if (VOICE_DEBUG) console.error("Failed to generate/play speech:", error);
+    try {
+      await speakWithSay(applyPronunciations(safeMessage));
+    } catch (sayError) {
+      if (VOICE_DEBUG) console.error("Fallback say also failed:", sayError);
+    }
+  }
+}
+
+// Send notification with voice (uses queue for non-blocking audio)
 async function sendNotification(
   title: string,
   message: string,
@@ -370,77 +985,41 @@ async function sendNotification(
   const safeTitle = titleValidation.sanitized!;
   let safeMessage = stripMarkers(messageValidation.sanitized!);
 
-  // Generate and play voice
+  // Queue voice for non-blocking playback
+  // The queue handles: other audio detection, serialization, process exit waiting
   if (voiceEnabled) {
-    try {
-      if (ELEVENLABS_API_KEY) {
-        const voice = voiceId || DEFAULT_VOICE_ID;
-
-        // Get voice configuration (personality settings)
-        const voiceConfig = getVoiceConfig(voice);
-
-        // Build prosody: request > voice config > DA config > defaults
-        let prosody: Partial<ProsodySettings> = {};
-
-        // First try voice config from AGENTPERSONALITIES.md
-        if (voiceConfig) {
-          if (voiceConfig.prosody) {
-            // New format: nested prosody object
-            prosody = voiceConfig.prosody;
-          } else {
-            // Legacy format: flat fields
-            prosody = {
-              stability: voiceConfig.stability,
-              similarity_boost: voiceConfig.similarity_boost,
-              style: voiceConfig.style ?? DEFAULT_PROSODY.style,
-              speed: voiceConfig.speed ?? DEFAULT_PROSODY.speed,
-              use_speaker_boost: voiceConfig.use_speaker_boost ?? DEFAULT_PROSODY.use_speaker_boost,
-            };
-          }
-          console.log(`Voice: ${voiceConfig.description}`);
-        } else if (voice === DEFAULT_VOICE_ID && daVoiceProsody) {
-          // Using DA's default voice - use prosody from settings.json
-          prosody = daVoiceProsody;
-          console.log(`Voice: DA default`);
-        }
-
-        // Request prosody overrides config prosody
-        if (requestProsody) {
-          prosody = { ...prosody, ...requestProsody };
-          console.log(`Using request prosody overrides`);
-        }
-
-        const settings = { ...DEFAULT_PROSODY, ...prosody };
-        const volume = (prosody as any)?.volume ?? daVoiceProsody?.volume;
-        console.log(`Generating speech (voice: ${voice}, stability: ${settings.stability}, style: ${settings.style}, speed: ${settings.speed}, volume: ${volume ?? 1.0})`);
-
-        const spokenMessage = applyPronunciations(safeMessage);
-        const audioBuffer = await generateSpeech(spokenMessage, voice, prosody);
-        await playAudio(audioBuffer, volume);
-      } else {
-        // Fallback to macOS say
-        console.log('Using macOS say (no API key)');
-        await speakWithSay(applyPronunciations(safeMessage));
-      }
-    } catch (error) {
-      console.error("Failed to generate/play speech:", error);
-      // Try fallback to say command
-      try {
-        await speakWithSay(applyPronunciations(safeMessage));
-      } catch (sayError) {
-        console.error("Fallback say also failed:", sayError);
-      }
-    }
+    // Fire and forget - queue processes in background
+    // No await here: notification displays immediately while voice queues
+    audioQueue.enqueue({
+      title: safeTitle,
+      message: safeMessage,
+      voiceEnabled: true,
+      voiceId: voiceId,
+      prosody: requestProsody,
+    }).catch(error => {
+      if (VOICE_DEBUG) console.error('Voice queue error:', error);
+    });
   }
 
-  // Display macOS notification - escape for AppleScript
+  // Display system notification (platform-specific)
   try {
-    const escapedTitle = escapeForAppleScript(safeTitle);
-    const escapedMessage = escapeForAppleScript(safeMessage);
-    const script = `display notification "${escapedMessage}" with title "${escapedTitle}" sound name ""`;
-    await spawnSafe('/usr/bin/osascript', ['-e', script]);
+    if (IS_MACOS) {
+      // macOS: use osascript
+      const escapedTitle = escapeForAppleScript(safeTitle);
+      const escapedMessage = escapeForAppleScript(safeMessage);
+      const script = `display notification "${escapedMessage}" with title "${escapedTitle}" sound name ""`;
+      await spawnSafe('/usr/bin/osascript', ['-e', script]);
+    } else if (IS_LINUX) {
+      // Linux: use notify-send if available
+      try {
+        await spawnSafe('notify-send', [safeTitle, safeMessage]);
+      } catch {
+        // notify-send not available, skip desktop notification
+        if (VOICE_DEBUG) console.log('notify-send not available, skipping desktop notification');
+      }
+    }
   } catch (error) {
-    console.error("Notification display error:", error);
+    if (VOICE_DEBUG) console.error("Notification display error:", error);
   }
 }
 
@@ -514,7 +1093,7 @@ const server = serve({
           throw new Error('Invalid voice_id');
         }
 
-        console.log(`Notification: "${title}" - "${message}" (voice: ${voiceEnabled}, voiceId: ${voiceId || DEFAULT_VOICE_ID})`);
+        if (VOICE_DEBUG) console.log(`Notification: "${title}" - "${message}" (voice: ${voiceEnabled}, voiceId: ${voiceId || DEFAULT_VOICE_ID})`);
 
         await sendNotification(title, message, voiceEnabled, voiceId, voiceSettings);
 
@@ -526,7 +1105,7 @@ const server = serve({
           }
         );
       } catch (error: any) {
-        console.error("Notification error:", error);
+        if (VOICE_DEBUG) console.error("Notification error:", error);
         return new Response(
           JSON.stringify({ status: "error", message: error.message || "Internal server error" }),
           {
@@ -543,7 +1122,7 @@ const server = serve({
         const title = data.title || "PAI Assistant";
         const message = data.message || "Task completed";
 
-        console.log(`PAI notification: "${title}" - "${message}"`);
+        if (VOICE_DEBUG) console.log(`PAI notification: "${title}" - "${message}"`);
 
         await sendNotification(title, message, true, null);
 
@@ -555,7 +1134,7 @@ const server = serve({
           }
         );
       } catch (error: any) {
-        console.error("PAI notification error:", error);
+        if (VOICE_DEBUG) console.error("PAI notification error:", error);
         return new Response(
           JSON.stringify({ status: "error", message: error.message || "Internal server error" }),
           {
@@ -567,13 +1146,25 @@ const server = serve({
     }
 
     if (url.pathname === "/health") {
+      const qwen3Ready = await checkQwen3Available();
+      let voiceSystem = "OS TTS (say/espeak)";
+      if (ELEVENLABS_API_KEY) {
+        voiceSystem = "ElevenLabs (cloud)";
+      } else if (qwen3Ready) {
+        voiceSystem = "Qwen3-TTS (local)";
+      }
+
       return new Response(
         JSON.stringify({
           status: "healthy",
           port: PORT,
-          voice_system: ELEVENLABS_API_KEY ? "ElevenLabs" : "macOS Say",
+          voice_system: voiceSystem,
+          elevenlabs_configured: !!ELEVENLABS_API_KEY,
+          qwen3_available: qwen3Ready,
+          qwen3_port: QWEN3_PORT,
           default_voice_id: DEFAULT_VOICE_ID,
-          api_key_configured: !!ELEVENLABS_API_KEY
+          audio_player_mp3: LINUX_AUDIO_PLAYER_MP3?.name || (IS_MACOS ? 'afplay' : null),
+          audio_player_wav: LINUX_AUDIO_PLAYER_WAV?.name || (IS_MACOS ? 'afplay' : null)
         }),
         {
           headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -589,8 +1180,34 @@ const server = serve({
   },
 });
 
-console.log(`Voice Server running on port ${PORT}`);
-console.log(`Using ${ELEVENLABS_API_KEY ? 'ElevenLabs' : 'macOS Say'} TTS (default voice: ${DEFAULT_VOICE_ID})`);
-console.log(`POST to http://localhost:${PORT}/notify`);
-console.log(`Security: CORS restricted to localhost, rate limiting enabled`);
-console.log(`API Key: ${ELEVENLABS_API_KEY ? 'Configured' : 'Not configured (using fallback)'}`);
+// Startup message with TTS engine info
+async function logStartup() {
+  console.log(`Voice Server running on port ${PORT}`);
+
+  let ttsDescription: string;
+  if (ELEVENLABS_API_KEY) {
+    ttsDescription = 'ElevenLabs (cloud) → MP3';
+  } else {
+    const qwen3Ready = await checkQwen3Available();
+    if (qwen3Ready) {
+      ttsDescription = `Qwen3-TTS (local :${QWEN3_PORT}) → WAV`;
+    } else {
+      ttsDescription = IS_MACOS ? 'macOS Say' : (LINUX_TTS?.command || 'no TTS');
+    }
+  }
+
+  console.log(`TTS Engine: ${ttsDescription}`);
+  console.log(`Default voice: ${DEFAULT_VOICE_ID || '(none configured)'}`);
+  console.log(`POST to http://localhost:${PORT}/notify`);
+  console.log(`Security: CORS restricted to localhost, rate limiting enabled`);
+
+  if (!ELEVENLABS_API_KEY) {
+    console.log(`Note: Set ELEVENLABS_API_KEY in ~/.env for cloud TTS`);
+    const qwen3Ready = await checkQwen3Available();
+    if (!qwen3Ready) {
+      console.log(`Note: Start qwen/qwen3-server.py on :${QWEN3_PORT} for local TTS`);
+    }
+  }
+}
+
+logStartup();

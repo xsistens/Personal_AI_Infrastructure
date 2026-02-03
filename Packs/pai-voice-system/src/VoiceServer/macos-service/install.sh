@@ -14,6 +14,7 @@ NC='\033[0m' # No Color
 
 # Configuration
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+VOICE_DIR="$( cd "$SCRIPT_DIR/.." && pwd )"
 SERVICE_NAME="com.pai.voice-server"
 PLIST_PATH="$HOME/Library/LaunchAgents/${SERVICE_NAME}.plist"
 LOG_PATH="$HOME/Library/Logs/pai-voice-server.log"
@@ -91,11 +92,11 @@ cat > "$PLIST_PATH" << EOF
     <array>
         <string>$(which bun)</string>
         <string>run</string>
-        <string>${SCRIPT_DIR}/server.ts</string>
+        <string>${VOICE_DIR}/server.ts</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>${SCRIPT_DIR}</string>
+    <string>${VOICE_DIR}</string>
 
     <key>RunAtLoad</key>
     <true/>
@@ -150,7 +151,7 @@ if curl -s -f -X GET http://localhost:8888/health > /dev/null 2>&1; then
 else
     echo -e "${RED}X Voice server is not responding${NC}"
     echo "  Check logs at: $LOG_PATH"
-    echo "  Try running manually: bun run $SCRIPT_DIR/server.ts"
+    echo "  Try running manually: bun run $VOICE_DIR/server.ts"
     exit 1
 fi
 
