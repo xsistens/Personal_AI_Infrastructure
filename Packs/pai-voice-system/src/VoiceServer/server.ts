@@ -489,6 +489,52 @@ async function checkQwen3Available(): Promise<boolean> {
   return qwen3Available;
 }
 
+// ============================================================================
+// TTS Engine Selection — "which engine" is decided once at initialization.
+// Runtime dispatch uses the cached selection without re-checking availability.
+// ============================================================================
+
+type LocalTTSEngine = 'piper' | 'qwen3' | 'os-tts';
+
+/**
+ * Determine which local TTS engine to use based on configuration and availability.
+ * Called once at initialization — result is cached in selectedLocalEngine.
+ */
+async function selectLocalTTSEngine(): Promise<LocalTTSEngine> {
+  if (PAI_TTS_ENGINE === 'piper' && checkPiperAvailable()) {
+    return 'piper';
+  }
+  if (await checkQwen3Available()) {
+    return 'qwen3';
+  }
+  return 'os-tts';
+}
+
+// Cached engine selection — set during initialization, used for all runtime dispatch
+let selectedLocalEngine: LocalTTSEngine = 'os-tts';
+
+/**
+ * Dispatch TTS using the pre-selected local engine.
+ * No availability checks — engine was validated at initialization.
+ * Expects text with pronunciations already applied.
+ */
+async function dispatchLocalTTS(spokenMessage: string): Promise<void> {
+  switch (selectedLocalEngine) {
+    case 'piper':
+      console.log(`Generating speech [Piper] (model: ${PIPER_DEFAULT_MODEL})`);
+      const audioBuffer = await generateSpeechPiper(spokenMessage);
+      await playAudio(audioBuffer, 'wav');
+      break;
+    case 'qwen3':
+      await playQwen3Progressive(spokenMessage, "Ryan", QWEN3_DEFAULT_INSTRUCT);
+      break;
+    case 'os-tts':
+      console.log('Using OS TTS fallback');
+      await speakWithSay(spokenMessage);
+      break;
+  }
+}
+
 // Generate speech using Qwen3-TTS (local fallback)
 async function generateSpeechQwen3(
   text: string,
@@ -770,24 +816,6 @@ function spawnSafe(command: string, args: string[]): Promise<void> {
 }
 
 /**
- * Local TTS fallback chain — used when ElevenLabs is not configured or fails.
- * Tries engines in order: configured engine (Piper/Qwen3) → OS TTS (say/espeak).
- * Expects text with pronunciations already applied.
- */
-async function fallbackTTS(spokenMessage: string): Promise<void> {
-  if (PAI_TTS_ENGINE === 'piper' && checkPiperAvailable()) {
-    console.log(`Generating speech [Piper] (model: ${PIPER_DEFAULT_MODEL})`);
-    const audioBuffer = await generateSpeechPiper(spokenMessage);
-    await playAudio(audioBuffer, 'wav');
-  } else if (await checkQwen3Available()) {
-    await playQwen3Progressive(spokenMessage, "Ryan", QWEN3_DEFAULT_INSTRUCT);
-  } else {
-    console.log('Using OS TTS fallback');
-    await speakWithSay(spokenMessage);
-  }
-}
-
-/**
  * Process voice for a notification (TTS generation + playback).
  * Called by the AudioQueue worker - no polling needed, queue handles serialization.
  */
@@ -837,12 +865,12 @@ async function processNotificationVoice(
       await playAudio(audioBuffer, 'mp3', volume);
     } else {
       // No ElevenLabs API key — use local TTS fallback chain
-      await fallbackTTS(applyPronunciations(safeMessage));
+      await dispatchLocalTTS(applyPronunciations(safeMessage));
     }
   } catch (error) {
     console.error("Failed to generate/play speech:", error);
     try {
-      await fallbackTTS(applyPronunciations(safeMessage));
+      await dispatchLocalTTS(applyPronunciations(safeMessage));
     } catch (fallbackError) {
       console.error("All TTS engines failed:", fallbackError);
     }
@@ -1034,16 +1062,9 @@ const server = serve({
     }
 
     if (url.pathname === "/health") {
-      const qwen3Ready = await checkQwen3Available();
-      const piperReady = checkPiperAvailable();
-      let voiceSystem = "OS TTS (say/espeak)";
-      if (ELEVENLABS_API_KEY) {
-        voiceSystem = "ElevenLabs (cloud)";
-      } else if (PAI_TTS_ENGINE === 'piper' && piperReady) {
-        voiceSystem = "Piper TTS (local)";
-      } else if (qwen3Ready) {
-        voiceSystem = "Qwen3-TTS (local)";
-      }
+      const voiceSystem = ELEVENLABS_API_KEY
+        ? "ElevenLabs (cloud)"
+        : ENGINE_DESCRIPTIONS[selectedLocalEngine];
 
       return new Response(
         JSON.stringify({
@@ -1051,10 +1072,11 @@ const server = serve({
           port: PORT,
           voice_system: voiceSystem,
           tts_engine_preference: PAI_TTS_ENGINE,
+          selected_local_engine: selectedLocalEngine,
           elevenlabs_configured: !!ELEVENLABS_API_KEY,
-          piper_available: piperReady,
-          piper_model: piperReady ? PIPER_DEFAULT_MODEL : null,
-          qwen3_available: qwen3Ready,
+          piper_available: selectedLocalEngine === 'piper' || checkPiperAvailable(),
+          piper_model: checkPiperAvailable() ? PIPER_DEFAULT_MODEL : null,
+          qwen3_available: selectedLocalEngine === 'qwen3',
           qwen3_port: QWEN3_PORT,
           default_voice_id: DEFAULT_VOICE_ID,
           audio_player_mp3: LINUX_AUDIO_PLAYER_MP3?.name || (IS_MACOS ? 'afplay' : null),
@@ -1074,38 +1096,27 @@ const server = serve({
   },
 });
 
-// Startup message with TTS engine info
-async function logStartup() {
-  console.log(`Voice Server running on port ${PORT}`);
-  console.log(`TTS engine preference: ${PAI_TTS_ENGINE}`);
+// Initialize TTS engine selection (runs checks once, caches result)
+selectedLocalEngine = await selectLocalTTSEngine();
 
-  let ttsDescription: string;
-  if (ELEVENLABS_API_KEY) {
-    ttsDescription = 'ElevenLabs (cloud) → MP3';
-  } else if (PAI_TTS_ENGINE === 'piper' && checkPiperAvailable()) {
-    ttsDescription = `Piper TTS (local CPU, model: ${PIPER_DEFAULT_MODEL}) → WAV`;
-  } else {
-    const qwen3Ready = await checkQwen3Available();
-    if (qwen3Ready) {
-      ttsDescription = `Qwen3-TTS (local :${QWEN3_PORT}) → WAV`;
-    } else {
-      ttsDescription = IS_MACOS ? 'macOS Say' : (LINUX_TTS?.command || 'no TTS');
-    }
-  }
+// Startup logging
+const ENGINE_DESCRIPTIONS: Record<string, string> = {
+  'piper': `Piper TTS (local CPU, model: ${PIPER_DEFAULT_MODEL}) → WAV`,
+  'qwen3': `Qwen3-TTS (local :${QWEN3_PORT}) → WAV`,
+  'os-tts': IS_MACOS ? 'macOS Say' : (LINUX_TTS?.command || 'no TTS'),
+};
 
-  console.log(`TTS Engine: ${ttsDescription}`);
-  console.log(`Piper TTS: ${checkPiperAvailable() ? 'available' : 'not found'}`);
-  console.log(`Default voice: ${DEFAULT_VOICE_ID || '(none configured)'}`);
-  console.log(`POST to http://localhost:${PORT}/notify`);
-  console.log(`Security: CORS restricted to localhost, rate limiting enabled`);
+console.log(`Voice Server running on port ${PORT}`);
+console.log(`TTS engine preference: ${PAI_TTS_ENGINE}`);
+console.log(`TTS Engine: ${ELEVENLABS_API_KEY ? 'ElevenLabs (cloud) → MP3' : ENGINE_DESCRIPTIONS[selectedLocalEngine]}`);
+console.log(`Local TTS engine: ${selectedLocalEngine} (${ENGINE_DESCRIPTIONS[selectedLocalEngine]})`);
+console.log(`Default voice: ${DEFAULT_VOICE_ID || '(none configured)'}`);
+console.log(`POST to http://localhost:${PORT}/notify`);
+console.log(`Security: CORS restricted to localhost, rate limiting enabled`);
 
-  if (!ELEVENLABS_API_KEY) {
-    console.log(`Note: Set ELEVENLABS_API_KEY in ~/.env for cloud TTS`);
-    const qwen3Ready = await checkQwen3Available();
-    if (!qwen3Ready && PAI_TTS_ENGINE !== 'piper') {
-      console.log(`Note: Start qwen3-server.py on :${QWEN3_PORT} for local TTS`);
-    }
+if (!ELEVENLABS_API_KEY) {
+  console.log(`Note: Set ELEVENLABS_API_KEY in ~/.env for cloud TTS`);
+  if (selectedLocalEngine === 'os-tts') {
+    console.log(`Note: Install Piper or start qwen3-server.py on :${QWEN3_PORT} for better local TTS`);
   }
 }
-
-logStartup();
