@@ -4,7 +4,8 @@
  *
  * TTS Engines:
  * - ElevenLabs (cloud) when API key available → MP3 → mpv/mpg123
- * - Qwen3-TTS (local) when no API key → WAV → paplay
+ * - Piper TTS (local CPU, Linux) when PAI_TTS_ENGINE=piper → WAV → paplay
+ * - Qwen3-TTS (local GPU) when no API key → WAV → paplay (progressive)
  */
 
 import { serve } from "bun";
@@ -17,12 +18,13 @@ import { existsSync, readFileSync } from "fs";
 const IS_MACOS = platform() === 'darwin';
 const IS_LINUX = platform() === 'linux';
 
-// Verbose logging - only enabled via environment variable
-// Startup/init logs are always shown; per-request processing logs require this flag
-const VOICE_DEBUG = process.env.VOICE_DEBUG === 'true';
-
 // Qwen3-TTS internal server port (runs alongside this server)
 const QWEN3_PORT = parseInt(process.env.QWEN3_INTERNAL_PORT || "8889");
+
+// Piper TTS configuration (Linux-only, CPU-based, fast alternative to Qwen3)
+const PAI_TTS_ENGINE = process.env.PAI_TTS_ENGINE || "qwen3"; // "piper" | "qwen3"
+const PIPER_MODEL_DIR = process.env.PIPER_MODEL_DIR || join(homedir(), '.local', 'share', 'piper-voices');
+const PIPER_DEFAULT_MODEL = process.env.PIPER_MODEL || "en_US-ryan-high";
 
 // Default voice style instruction for Qwen3-TTS (formal, consistent delivery)
 // Prevents random emotional variations like laughter or tone shifts
@@ -151,7 +153,7 @@ class AudioQueue {
         // Check for other audio (YouTube, etc.) - skip if playing
         const audioStatus = checkAudioStatus();
         if (audioStatus.otherAudioPlaying) {
-          if (VOICE_DEBUG) console.log('Voice skipped: other audio currently playing');
+          console.log('Voice skipped: other audio currently playing');
           notification.resolve(); // Resolve without playing
           continue;
         }
@@ -165,7 +167,7 @@ class AudioQueue {
         );
         notification.resolve();
       } catch (error) {
-        if (VOICE_DEBUG) console.error('Queue processing error:', error);
+        console.error('Queue processing error:', error);
         notification.reject(error instanceof Error ? error : new Error(String(error)));
       }
     }
@@ -614,6 +616,92 @@ async function checkQwen3Available(): Promise<boolean> {
   return qwen3Available;
 }
 
+// Check if Piper TTS is available (Linux only, CLI-based)
+let piperAvailable: boolean | null = null;
+let piperBinaryPath: string | null = null;
+
+function checkPiperAvailable(): boolean {
+  if (piperAvailable !== null) return piperAvailable;
+  if (!IS_LINUX) {
+    piperAvailable = false;
+    return false;
+  }
+
+  try {
+    piperBinaryPath = execSync('which piper', { encoding: 'utf-8', timeout: 3000 }).trim();
+    // Verify the model file exists
+    const modelPath = join(PIPER_MODEL_DIR, `${PIPER_DEFAULT_MODEL}.onnx`);
+    if (!existsSync(modelPath)) {
+      console.warn(`Piper binary found but model missing: ${modelPath}`);
+      piperAvailable = false;
+      return false;
+    }
+    piperAvailable = true;
+  } catch {
+    piperAvailable = false;
+  }
+
+  return piperAvailable;
+}
+
+/**
+ * Generate speech using Piper TTS (local, CPU-based, fast).
+ *
+ * Pipes text to piper CLI stdin, reads WAV output file.
+ * Output: WAV (sample rate depends on model, typically 22050 Hz).
+ * No progressive playback needed — Piper generates fast enough for full text.
+ */
+async function generateSpeechPiper(text: string): Promise<ArrayBuffer> {
+  if (!piperBinaryPath) {
+    throw new Error('Piper TTS binary not found');
+  }
+
+  const modelPath = join(PIPER_MODEL_DIR, `${PIPER_DEFAULT_MODEL}.onnx`);
+  const outputFile = `/tmp/voice-piper-${Date.now()}.wav`;
+  const startTime = Date.now();
+
+  return new Promise((resolve, reject) => {
+    const args = [
+      '-m', modelPath,
+      '-f', outputFile,
+      '-q', // quiet mode
+    ];
+
+    const proc = spawn(piperBinaryPath!, args);
+
+    let stderr = '';
+    proc.stderr?.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+
+    proc.on('error', (error) => {
+      reject(new Error(`Piper spawn error: ${error.message}`));
+    });
+
+    proc.on('exit', async (code) => {
+      if (code !== 0) {
+        reject(new Error(`Piper exited with code ${code}: ${stderr}`));
+        return;
+      }
+
+      try {
+        const file = Bun.file(outputFile);
+        const buffer = await file.arrayBuffer();
+        spawn('/bin/rm', ['-f', outputFile]);
+        const elapsed = Date.now() - startTime;
+        console.log(`Piper TTS: Generated ${(buffer.byteLength / 1024).toFixed(1)}KB in ${elapsed}ms`);
+        resolve(buffer);
+      } catch (err) {
+        reject(new Error(`Failed to read Piper output: ${err}`));
+      }
+    });
+
+    // Write text to stdin and close
+    proc.stdin?.write(text);
+    proc.stdin?.end();
+  });
+}
+
 // Generate speech using Qwen3-TTS (local fallback)
 async function generateSpeechQwen3(
   text: string,
@@ -662,7 +750,7 @@ async function playQwen3Progressive(
   if (sentences.length <= 1) {
     const audioBuffer = await generateSpeechQwen3(text, speaker, instruct);
     await playAudio(audioBuffer, 'wav');
-    if (VOICE_DEBUG) console.log(`Qwen3-TTS: Completed in ${Date.now() - startTime}ms (single)`);
+    console.log(`Qwen3-TTS: Completed in ${Date.now() - startTime}ms (single)`);
     return;
   }
 
@@ -690,7 +778,7 @@ async function playQwen3Progressive(
             playNext();
           }
         } catch (error) {
-          if (VOICE_DEBUG) console.error(`Qwen3-TTS: Failed to generate sentence ${i + 1}:`, error);
+          console.error(`Qwen3-TTS: Failed to generate sentence ${i + 1}:`, error);
           // Put empty buffer to maintain order
           audioQueue[i] = new ArrayBuffer(0);
         }
@@ -731,7 +819,7 @@ async function playQwen3Progressive(
       try {
         await playAudio(buffer, 'wav');
       } catch (error) {
-        if (VOICE_DEBUG) console.error(`Qwen3-TTS: Playback error:`, error);
+        console.error(`Qwen3-TTS: Playback error:`, error);
       }
 
       isPlaying = false;
@@ -758,7 +846,7 @@ async function playQwen3Progressive(
 
   await done;
   const totalTime = Date.now() - startTime;
-  if (VOICE_DEBUG) console.log(`Qwen3-TTS: ${sentences.length} sentences, first-audio: ${firstAudioTime}ms, total: ${totalTime}ms`);
+  console.log(`Qwen3-TTS: ${sentences.length} sentences, first-audio: ${firstAudioTime}ms, total: ${totalTime}ms`);
 }
 
 // Get volume setting from DA config or request (defaults to 1.0 = 100%)
@@ -804,7 +892,7 @@ async function playAudio(
         args.push(...linuxPlayer.volumeArg(volume));
       }
       args.push(tempFile);
-      if (VOICE_DEBUG) console.log(`Playing ${format} with ${linuxPlayer.name}`);
+      console.log(`Playing ${format} with ${linuxPlayer.name}`);
       proc = spawn(linuxPlayer.command, args);
     } else {
       // Cleanup and fail
@@ -814,7 +902,7 @@ async function playAudio(
     }
 
     proc.on('error', (error) => {
-      if (VOICE_DEBUG) console.error('Error playing audio:', error);
+      console.error('Error playing audio:', error);
       spawn('/bin/rm', ['-f', tempFile]);
       reject(error);
     });
@@ -853,13 +941,13 @@ async function speakWithSay(text: string): Promise<void> {
         proc = spawn(LINUX_TTS.command, LINUX_TTS.args(text));
       }
     } else {
-      if (VOICE_DEBUG) console.warn('No TTS fallback available for this platform');
+      console.warn('No TTS fallback available for this platform');
       resolve(); // Silently succeed - TTS fallback is optional
       return;
     }
 
     proc.on('error', (error) => {
-      if (VOICE_DEBUG) console.error('Error with TTS command:', error);
+      console.error('Error with TTS command:', error);
       reject(error);
     });
 
@@ -880,7 +968,7 @@ function spawnSafe(command: string, args: string[]): Promise<void> {
     const proc = spawn(command, args);
 
     proc.on('error', (error) => {
-      if (VOICE_DEBUG) console.error(`Error spawning ${command}:`, error);
+      console.error(`Error spawning ${command}:`, error);
       reject(error);
     });
 
@@ -925,10 +1013,10 @@ async function processNotificationVoice(
             use_speaker_boost: voiceConfig.use_speaker_boost ?? DEFAULT_PROSODY.use_speaker_boost,
           };
         }
-        if (VOICE_DEBUG) console.log(`Voice: ${voiceConfig.description}`);
+        console.log(`Voice: ${voiceConfig.description}`);
       } else if (voice === DEFAULT_VOICE_ID && daVoiceProsody) {
         prosody = daVoiceProsody;
-        if (VOICE_DEBUG) console.log(`Voice: DA default`);
+        console.log(`Voice: DA default`);
       }
 
       if (requestProsody) {
@@ -937,26 +1025,32 @@ async function processNotificationVoice(
 
       const settings = { ...DEFAULT_PROSODY, ...prosody };
       const volume = (prosody as any)?.volume ?? daVoiceProsody?.volume;
-      if (VOICE_DEBUG) console.log(`Generating speech [ElevenLabs] (voice: ${voice}, stability: ${settings.stability}, style: ${settings.style}, speed: ${settings.speed}, volume: ${volume ?? 1.0})`);
+      console.log(`Generating speech [ElevenLabs] (voice: ${voice}, stability: ${settings.stability}, style: ${settings.style}, speed: ${settings.speed}, volume: ${volume ?? 1.0})`);
 
       const spokenMessage = applyPronunciations(safeMessage);
       const audioBuffer = await generateSpeech(spokenMessage, voice, prosody);
       await playAudio(audioBuffer, 'mp3', volume);
+    } else if (PAI_TTS_ENGINE === 'piper' && checkPiperAvailable()) {
+      // Piper TTS (local, CPU-based, fast) → WAV
+      const spokenMessage = applyPronunciations(safeMessage);
+      console.log(`Generating speech [Piper] (model: ${PIPER_DEFAULT_MODEL})`);
+      const audioBuffer = await generateSpeechPiper(spokenMessage);
+      await playAudio(audioBuffer, 'wav');
     } else if (await checkQwen3Available()) {
       // Qwen3-TTS with progressive sentence playback
       const spokenMessage = applyPronunciations(safeMessage);
       await playQwen3Progressive(spokenMessage, "Ryan", QWEN3_DEFAULT_INSTRUCT);
     } else {
       // Ultimate fallback to OS TTS
-      if (VOICE_DEBUG) console.log('Using OS TTS fallback (no API key, Qwen3 unavailable)');
+      console.log('Using OS TTS fallback (no API key, Qwen3 unavailable)');
       await speakWithSay(applyPronunciations(safeMessage));
     }
   } catch (error) {
-    if (VOICE_DEBUG) console.error("Failed to generate/play speech:", error);
+    console.error("Failed to generate/play speech:", error);
     try {
       await speakWithSay(applyPronunciations(safeMessage));
     } catch (sayError) {
-      if (VOICE_DEBUG) console.error("Fallback say also failed:", sayError);
+      console.error("Fallback say also failed:", sayError);
     }
   }
 }
@@ -997,7 +1091,7 @@ async function sendNotification(
       voiceId: voiceId,
       prosody: requestProsody,
     }).catch(error => {
-      if (VOICE_DEBUG) console.error('Voice queue error:', error);
+      console.error('Voice queue error:', error);
     });
   }
 
@@ -1015,11 +1109,11 @@ async function sendNotification(
         await spawnSafe('notify-send', [safeTitle, safeMessage]);
       } catch {
         // notify-send not available, skip desktop notification
-        if (VOICE_DEBUG) console.log('notify-send not available, skipping desktop notification');
+        console.log('notify-send not available, skipping desktop notification');
       }
     }
   } catch (error) {
-    if (VOICE_DEBUG) console.error("Notification display error:", error);
+    console.error("Notification display error:", error);
   }
 }
 
@@ -1093,7 +1187,7 @@ const server = serve({
           throw new Error('Invalid voice_id');
         }
 
-        if (VOICE_DEBUG) console.log(`Notification: "${title}" - "${message}" (voice: ${voiceEnabled}, voiceId: ${voiceId || DEFAULT_VOICE_ID})`);
+        console.log(`Notification: "${title}" - "${message}" (voice: ${voiceEnabled}, voiceId: ${voiceId || DEFAULT_VOICE_ID})`);
 
         await sendNotification(title, message, voiceEnabled, voiceId, voiceSettings);
 
@@ -1105,7 +1199,7 @@ const server = serve({
           }
         );
       } catch (error: any) {
-        if (VOICE_DEBUG) console.error("Notification error:", error);
+        console.error("Notification error:", error);
         return new Response(
           JSON.stringify({ status: "error", message: error.message || "Internal server error" }),
           {
@@ -1122,7 +1216,7 @@ const server = serve({
         const title = data.title || "PAI Assistant";
         const message = data.message || "Task completed";
 
-        if (VOICE_DEBUG) console.log(`PAI notification: "${title}" - "${message}"`);
+        console.log(`PAI notification: "${title}" - "${message}"`);
 
         await sendNotification(title, message, true, null);
 
@@ -1134,7 +1228,7 @@ const server = serve({
           }
         );
       } catch (error: any) {
-        if (VOICE_DEBUG) console.error("PAI notification error:", error);
+        console.error("PAI notification error:", error);
         return new Response(
           JSON.stringify({ status: "error", message: error.message || "Internal server error" }),
           {
@@ -1147,9 +1241,12 @@ const server = serve({
 
     if (url.pathname === "/health") {
       const qwen3Ready = await checkQwen3Available();
+      const piperReady = checkPiperAvailable();
       let voiceSystem = "OS TTS (say/espeak)";
       if (ELEVENLABS_API_KEY) {
         voiceSystem = "ElevenLabs (cloud)";
+      } else if (PAI_TTS_ENGINE === 'piper' && piperReady) {
+        voiceSystem = "Piper TTS (local)";
       } else if (qwen3Ready) {
         voiceSystem = "Qwen3-TTS (local)";
       }
@@ -1159,7 +1256,10 @@ const server = serve({
           status: "healthy",
           port: PORT,
           voice_system: voiceSystem,
+          tts_engine_preference: PAI_TTS_ENGINE,
           elevenlabs_configured: !!ELEVENLABS_API_KEY,
+          piper_available: piperReady,
+          piper_model: piperReady ? PIPER_DEFAULT_MODEL : null,
           qwen3_available: qwen3Ready,
           qwen3_port: QWEN3_PORT,
           default_voice_id: DEFAULT_VOICE_ID,
@@ -1183,10 +1283,13 @@ const server = serve({
 // Startup message with TTS engine info
 async function logStartup() {
   console.log(`Voice Server running on port ${PORT}`);
+  console.log(`TTS engine preference: ${PAI_TTS_ENGINE}`);
 
   let ttsDescription: string;
   if (ELEVENLABS_API_KEY) {
     ttsDescription = 'ElevenLabs (cloud) → MP3';
+  } else if (PAI_TTS_ENGINE === 'piper' && checkPiperAvailable()) {
+    ttsDescription = `Piper TTS (local CPU, model: ${PIPER_DEFAULT_MODEL}) → WAV`;
   } else {
     const qwen3Ready = await checkQwen3Available();
     if (qwen3Ready) {
@@ -1197,6 +1300,7 @@ async function logStartup() {
   }
 
   console.log(`TTS Engine: ${ttsDescription}`);
+  console.log(`Piper TTS: ${checkPiperAvailable() ? `available (${piperBinaryPath})` : 'not found'}`);
   console.log(`Default voice: ${DEFAULT_VOICE_ID || '(none configured)'}`);
   console.log(`POST to http://localhost:${PORT}/notify`);
   console.log(`Security: CORS restricted to localhost, rate limiting enabled`);
@@ -1204,8 +1308,8 @@ async function logStartup() {
   if (!ELEVENLABS_API_KEY) {
     console.log(`Note: Set ELEVENLABS_API_KEY in ~/.env for cloud TTS`);
     const qwen3Ready = await checkQwen3Available();
-    if (!qwen3Ready) {
-      console.log(`Note: Start qwen/qwen3-server.py on :${QWEN3_PORT} for local TTS`);
+    if (!qwen3Ready && PAI_TTS_ENGINE !== 'piper') {
+      console.log(`Note: Start qwen3-server.py on :${QWEN3_PORT} for local TTS`);
     }
   }
 }

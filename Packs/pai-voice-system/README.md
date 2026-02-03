@@ -1,14 +1,14 @@
 ---
 name: PAI Voice System
-pack-id: danielmiessler-voice-system-core-v2.3.0
-version: 2.3.0
+pack-id: danielmiessler-voice-system-core-v2.6.0
+version: 2.6.0
 author: danielmiessler
-description: Text-to-speech notification server using ElevenLabs API with fallback to macOS say - gives your AI agent a voice
+description: Multi-engine text-to-speech notification server (ElevenLabs, Piper, Qwen3) for Linux and macOS - gives your AI agent a voice
 type: feature
 purpose-type: [productivity, automation, integration]
 platform: claude-code
 dependencies: []
-keywords: [voice, tts, speech, notifications, elevenlabs, audio, alerts, spoken, feedback, macos, agent-voice]
+keywords: [voice, tts, speech, notifications, elevenlabs, piper, qwen3, audio, alerts, spoken, feedback, macos, linux, agent-voice]
 ---
 
 <p align="center">
@@ -17,7 +17,7 @@ keywords: [voice, tts, speech, notifications, elevenlabs, audio, alerts, spoken,
 
 # PAI Voice System
 
-> Text-to-speech notification server that gives your AI agent a voice - using ElevenLabs AI voices or macOS say as fallback
+> Multi-engine TTS (ElevenLabs, Piper, Qwen3) for Linux and macOS - gives your AI agent a voice with automatic engine selection
 
 ## Installation Prompt
 
@@ -31,9 +31,10 @@ This pack adds voice capabilities to your AI infrastructure. The PAI Voice Syste
 
 - **Spoken Feedback**: Hear your AI speak completions, alerts, and notifications
 - **Multi-Voice Support**: Different voices for different agents (Architect, Engineer, Designer, etc.)
-- **ElevenLabs Integration**: High-quality AI voices with personality-tuned settings
-- **Fallback System**: Works without API key using macOS built-in voices
-- **Zero Configuration**: Install and go - speaks immediately
+- **Multi-Engine TTS**: ElevenLabs (cloud), Piper (local CPU), Qwen3-TTS (local GPU), plus platform fallbacks
+- **Cross-Platform**: Full support for both Linux and macOS
+- **Automatic Engine Selection**: Dispatch chain picks the best available engine
+- **Zero Configuration**: Install and go - speaks immediately with platform fallback
 
 **Core principle:** Your AI should be heard, not just read.
 
@@ -45,22 +46,22 @@ Please follow the installation instructions in INSTALL.md to integrate this pack
 
 ## What's Included
 
-| Component | File | Purpose |
+| Component | Path | Purpose |
 |-----------|------|---------|
-| Voice Server | `src/VoiceServer/server.ts` | HTTP server handling TTS requests |
-| Install Script | `src/VoiceServer/install.sh` | One-command installation |
-| Start Script | `src/VoiceServer/start.sh` | Start the voice server |
-| Stop Script | `src/VoiceServer/stop.sh` | Stop the voice server |
-| Restart Script | `src/VoiceServer/restart.sh` | Restart the voice server |
-| Status Script | `src/VoiceServer/status.sh` | Check server status |
-| Uninstall Script | `src/VoiceServer/uninstall.sh` | Clean uninstallation |
+| Voice Server | `src/VoiceServer/server.ts` | HTTP server handling TTS requests (cross-platform, all engines) |
+| Start Script | `src/VoiceServer/start.sh` | Cross-platform start script |
+| Stop Script | `src/VoiceServer/stop.sh` | Cross-platform stop script |
+| Restart Script | `src/VoiceServer/restart.sh` | Restart wrapper |
 | Voice Config | `src/VoiceServer/voices.json` | Agent voice personalities |
-| Menu Bar | `src/VoiceServer/menubar/` | SwiftBar/BitBar integration |
+| Linux Service | `src/VoiceServer/linux-service/` | systemd service + install/start/stop/status/uninstall scripts |
+| macOS Service | `src/VoiceServer/macos-service/` | LaunchAgent + install/start/stop/status/uninstall scripts + menubar |
+| Qwen3-TTS | `src/VoiceServer/qwen/` | Qwen3-TTS Python server (config, models, engine, HTTP server) |
 
 **Summary:**
-- **Files created:** 12+
+- **Files created:** 20+
 - **Hooks registered:** 0 (server-only pack)
-- **Dependencies:** Bun runtime, macOS, ElevenLabs API key (optional)
+- **Dependencies:** Bun runtime, ElevenLabs API key (optional), Python (optional, for Qwen3-TTS)
+- **Platforms:** Linux, macOS
 
 ---
 
@@ -93,46 +94,73 @@ AI agents are mute by default. They have no voice. Every output requires visual 
 
 ## The Solution
 
-The PAI Voice System solves this through a dedicated HTTP server that converts text to speech on demand. Any system component can trigger voice output with a simple POST request.
+The PAI Voice System solves this through a dedicated HTTP server that converts text to speech on demand. Any system component can trigger voice output with a simple POST request. The server automatically selects the best available TTS engine using a priority-based dispatch chain.
 
 **Core Architecture:**
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    PAI Voice System                          │
-├─────────────────────────────────────────────────────────────┤
-│                                                              │
-│   Hook/Agent/Tool                                            │
-│         │                                                    │
-│         ▼                                                    │
-│   POST http://localhost:8888/notify                          │
-│   {                                                          │
-│     "message": "Task completed successfully",                │
-│     "voice_id": "bIHbv24MWmeRgasZH58o",                      │
-│     "title": "Agent Name"                                    │
-│   }                                                          │
-│         │                                                    │
-│         ▼                                                    │
-│   ┌─────────────────┐                                        │
-│   │  Voice Server   │  (port 8888)                           │
-│   │                 │                                        │
-│   │  1. Sanitize    │  Strip markdown, validate              │
-│   │  2. TTS Call    │  ElevenLabs or macOS say               │
-│   │  3. Play Audio  │  afplay with volume control            │
-│   │  4. Notify      │  macOS notification center             │
-│   └─────────────────┘                                        │
-│                                                              │
-└─────────────────────────────────────────────────────────────┘
++---------------------------------------------------------------+
+|                    PAI Voice System                            |
++---------------------------------------------------------------+
+|                                                               |
+|   Hook/Agent/Tool                                             |
+|         |                                                     |
+|         v                                                     |
+|   POST http://localhost:8888/notify                           |
+|   {                                                           |
+|     "message": "Task completed successfully",                 |
+|     "voice_id": "bIHbv24MWmeRgasZH58o",                      |
+|     "title": "Agent Name"                                     |
+|   }                                                           |
+|         |                                                     |
+|         v                                                     |
+|   +-------------------+                                       |
+|   |  Voice Server     |  (port 8888)                          |
+|   |                   |                                       |
+|   |  1. Sanitize      |  Strip markdown, validate             |
+|   |  2. Engine Select |  Dispatch chain (see below)           |
+|   |  3. TTS Render    |  Generate speech audio                |
+|   |  4. Play Audio    |  Platform-appropriate playback        |
+|   |  5. Notify        |  Desktop notification (if available)  |
+|   +-------------------+                                       |
+|         |                                                     |
+|         v                                                     |
+|   TTS Engine Dispatch Chain (priority order):                 |
+|                                                               |
+|   [1] ElevenLabs (cloud)  -- API key required                 |
+|         |  (unavailable?)                                     |
+|         v                                                     |
+|   [2] Piper TTS (local)   -- PAI_TTS_ENGINE=piper, Linux      |
+|         |  (unavailable?)                                     |
+|         v                                                     |
+|   [3] Qwen3-TTS (GPU)    -- PAI_TTS_ENGINE=qwen3, CUDA       |
+|         |  (unavailable?)                                     |
+|         v                                                     |
+|   [4] espeak (Linux)  /  say (macOS)  -- platform fallback    |
+|                                                               |
++---------------------------------------------------------------+
 ```
+
+**TTS Engines:**
+
+| Engine | Type | Speed | Quality | Requirements |
+|--------|------|-------|---------|-------------|
+| ElevenLabs | Cloud API | Fast | Highest (AI voices) | API key, internet |
+| Piper TTS | Local CPU | ~2.6s | Good (neural) | Linux, piper binary |
+| Qwen3-TTS | Local GPU | ~25s | High (neural, progressive playback) | CUDA GPU, Python |
+| espeak | Local | Instant | Basic (robotic) | Linux (built-in) |
+| say | Local | Instant | Basic (system voice) | macOS (built-in) |
 
 **Key Features:**
 
-1. **ElevenLabs Integration**: High-quality AI voices with the `eleven_turbo_v2_5` model
-2. **Voice Personalities**: Each agent can have distinct voice settings (stability, similarity_boost)
-3. **macOS Fallback**: Works without API key using built-in `say` command
-4. **Security**: Input sanitization, rate limiting (10 req/min), CORS restrictions
-5. **LaunchAgent**: Auto-starts on login, runs in background
-6. **Menu Bar**: Optional visual indicator with quick controls
+1. **Multi-Engine TTS**: Automatic dispatch chain selects the best available engine
+2. **ElevenLabs Integration**: High-quality AI voices with the `eleven_turbo_v2_5` model
+3. **Piper TTS**: Fast local neural TTS on CPU, no internet required
+4. **Qwen3-TTS**: High-quality local GPU TTS with progressive audio playback
+5. **Voice Personalities**: Each agent can have distinct voice settings (stability, similarity_boost)
+6. **Platform Fallbacks**: espeak on Linux, say on macOS - always works
+7. **Security**: Input sanitization, rate limiting (10 req/min), CORS restrictions
+8. **Cross-Platform Services**: systemd on Linux, LaunchAgent on macOS
 
 **Design Principles:**
 
@@ -140,6 +168,7 @@ The PAI Voice System solves this through a dedicated HTTP server that converts t
 2. **Fail Gracefully**: Server issues never block other systems
 3. **Local Only**: Listens only on localhost for security
 4. **Zero Config**: Works immediately with sensible defaults
+5. **Best Available**: Automatically picks the highest-quality engine you have configured
 
 ---
 
@@ -151,8 +180,9 @@ The PAI Voice System is purpose-built for AI agent infrastructure. It provides a
 
 - Agent personalities with distinct voice characteristics.
 - HTTP API enables any component to speak.
-- Auto-start as macOS LaunchAgent service.
-- Menu bar indicator shows server status.
+- Multi-engine dispatch chain with automatic fallback.
+- Cross-platform: systemd service on Linux, LaunchAgent on macOS.
+- Local TTS engines (Piper, Qwen3) for offline or privacy-sensitive environments.
 
 ---
 
@@ -161,15 +191,30 @@ The PAI Voice System is purpose-built for AI agent infrastructure. It provides a
 **Environment variables (add to ~/.env):**
 
 ```bash
-# Required for ElevenLabs voices (optional - falls back to macOS say)
+# Required for ElevenLabs voices (optional - falls back to local engines)
 ELEVENLABS_API_KEY=your_api_key_here
 
-# Default voice ID (optional)
+# Default voice ID for ElevenLabs (optional)
 ELEVENLABS_VOICE_ID=bIHbv24MWmeRgasZH58o
 
 # Server port (optional, defaults to 8888)
 PORT=8888
+
+# TTS Engine override (optional - skips ElevenLabs, uses local engine)
+# Values: piper, qwen3
+PAI_TTS_ENGINE=piper
+
+# Piper TTS configuration (optional, Linux only)
+PIPER_MODEL=en_US-lessac-medium.onnx
+PIPER_MODEL_DIR=/path/to/piper/models
 ```
+
+**Engine Selection Logic:**
+
+1. If `PAI_TTS_ENGINE=piper` is set and Piper is available, use Piper
+2. If `PAI_TTS_ENGINE=qwen3` is set and the Qwen3 server is running, use Qwen3
+3. If `ELEVENLABS_API_KEY` is set, use ElevenLabs
+4. Otherwise, fall back to platform default (espeak on Linux, say on macOS)
 
 Get a free ElevenLabs API key at [elevenlabs.io](https://elevenlabs.io) (10,000 characters/month free).
 
@@ -235,6 +280,8 @@ curl http://localhost:8888/health
 
 Find more voices at [ElevenLabs Voice Library](https://elevenlabs.io/voice-library).
 
+Note: Voice IDs apply to ElevenLabs only. Piper and Qwen3 use their own model-based voice selection. Platform fallbacks (espeak, say) use system default voices.
+
 ---
 
 ## Customization
@@ -260,6 +307,8 @@ Find more voices at [ElevenLabs Voice Library](https://elevenlabs.io/voice-libra
 | Default volume | voices.json (`default_volume`) | 0.0-1.0 scale for all voices |
 | Speaking rate | voices.json (`rate_multiplier`) | Speed of speech |
 | Custom voices | voices.json | Add your own ElevenLabs voices |
+| TTS engine | ~/.env (`PAI_TTS_ENGINE`) | Force a specific local engine |
+| Piper model | ~/.env (`PIPER_MODEL`) | Choose a different Piper voice model |
 
 ---
 
@@ -267,11 +316,23 @@ Find more voices at [ElevenLabs Voice Library](https://elevenlabs.io/voice-libra
 
 - **Original concept**: Daniel Miessler - developed as part of PAI personal AI infrastructure
 - **ElevenLabs**: Text-to-speech API providing high-quality AI voices
+- **Piper TTS**: Fast local neural text-to-speech by Rhasspy
+- **Qwen3-TTS**: Local GPU-accelerated TTS by Alibaba
 - **SwiftBar/BitBar**: Menu bar integration for macOS
 
 ---
 
 ## Changelog
+
+### 2.6.0 - 2026-02-03
+- Multi-engine TTS dispatch chain: ElevenLabs, Piper, Qwen3, espeak/say
+- Added Piper TTS support (fast local neural TTS on CPU, Linux)
+- Added Qwen3-TTS support (high-quality local GPU TTS with progressive playback)
+- Full Linux support with systemd service management
+- Cross-platform start/stop/restart scripts
+- Platform-specific service directories (linux-service/, macos-service/)
+- New environment variables: PAI_TTS_ENGINE, PIPER_MODEL, PIPER_MODEL_DIR
+- espeak fallback for Linux (replaces macOS-only say fallback)
 
 ### 2.3.0 - 2026-01-14
 - Packaged for PAI v2.3 release
