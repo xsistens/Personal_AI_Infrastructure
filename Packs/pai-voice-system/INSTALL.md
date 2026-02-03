@@ -1,4 +1,4 @@
-# PAI Voice System v2.3.0 - Installation Guide
+# PAI Voice System v2.6.0 - Installation Guide
 
 **This guide is designed for AI agents installing this pack into a user's infrastructure.**
 
@@ -17,7 +17,7 @@
 
 Before starting, greet the user:
 ```
-"I'm installing PAI Voice System v2.3.0 - Voice notification server. This enables spoken notifications using ElevenLabs for natural speech, with fallback to macOS built-in voice.
+"I'm installing PAI Voice System v2.6.0 - Voice notification server. This enables spoken notifications using ElevenLabs for natural speech, with local TTS engines (Piper, Qwen3) on Linux, and platform-native voice fallback.
 
 Let me analyze your system and guide you through installation."
 ```
@@ -33,6 +33,18 @@ Let me analyze your system and guide you through installation."
 ```bash
 PAI_CHECK="${PAI_DIR:-$HOME/.claude}"
 echo "PAI_DIR: $PAI_CHECK"
+
+# Detect platform
+if [[ "$OSTYPE" == "darwin"* ]]; then
+  echo "OK macOS detected"
+  PLATFORM="macos"
+elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
+  echo "OK Linux detected"
+  PLATFORM="linux"
+else
+  echo "WARNING Unsupported platform: $OSTYPE"
+  PLATFORM="unknown"
+fi
 
 # Check if pai-core-install is installed (REQUIRED)
 if [ -f "$PAI_CHECK/skills/CORE/SKILL.md" ]; then
@@ -56,12 +68,21 @@ else
   echo "ERROR Bun not installed - REQUIRED!"
 fi
 
-# Check if port 8888 is in use
-if lsof -i :8888 &> /dev/null; then
-  echo "WARNING Port 8888 is in use (existing voice server?)"
-  lsof -i :8888 | head -3
+# Check if port 8888 is in use (cross-platform)
+if [[ "$PLATFORM" == "linux" ]]; then
+  if ss -tlnp 2>/dev/null | grep -q ':8888 '; then
+    echo "WARNING Port 8888 is in use (existing voice server?)"
+    ss -tlnp | grep ':8888 ' | head -3
+  else
+    echo "OK Port 8888 is available"
+  fi
 else
-  echo "OK Port 8888 is available"
+  if lsof -i :8888 &> /dev/null; then
+    echo "WARNING Port 8888 is in use (existing voice server?)"
+    lsof -i :8888 | head -3
+  else
+    echo "OK Port 8888 is available"
+  fi
 fi
 
 # Check for ElevenLabs credentials
@@ -70,7 +91,35 @@ if [ -n "$ELEVENLABS_API_KEY" ]; then
 elif grep -q "ELEVENLABS_API_KEY" ~/.env 2>/dev/null; then
   echo "OK ELEVENLABS_API_KEY found in ~/.env"
 else
-  echo "NOTE ELEVENLABS_API_KEY not set (will use macOS voice)"
+  echo "NOTE ELEVENLABS_API_KEY not set (will use local TTS or platform voice)"
+fi
+
+# Check for Piper TTS
+if command -v piper &> /dev/null; then
+  echo "OK Piper TTS is installed: $(piper --version 2>&1 || echo 'version unknown')"
+else
+  echo "NOTE Piper TTS not installed (optional local TTS engine)"
+fi
+
+# Check for Piper voice models
+if [ -d "$HOME/.local/share/piper-voices" ] && ls "$HOME/.local/share/piper-voices/"*.onnx &> /dev/null; then
+  echo "OK Piper voice models found in ~/.local/share/piper-voices/"
+else
+  echo "NOTE No Piper voice models found"
+fi
+
+# Check for Python (Qwen3 requirement)
+if command -v python3 &> /dev/null; then
+  echo "OK Python3 is installed: $(python3 --version)"
+else
+  echo "NOTE Python3 not installed (required for Qwen3-TTS)"
+fi
+
+# Check for NVIDIA GPU (Qwen3 requirement)
+if command -v nvidia-smi &> /dev/null; then
+  echo "OK NVIDIA GPU detected: $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)"
+else
+  echo "NOTE No NVIDIA GPU detected (required for Qwen3-TTS)"
 fi
 
 # Check for backup directories with credentials
@@ -80,11 +129,19 @@ for backup in "$HOME/.claude.bak" "$HOME/.claude-backup" "$HOME/.claude-old" "$H
   fi
 done
 
-# Check macOS version (for audio playback)
-if [[ "$OSTYPE" == "darwin"* ]]; then
-  echo "OK macOS detected - audio playback available"
-else
-  echo "WARNING Not macOS - audio playback may not work"
+# Check audio playback capability
+if [[ "$PLATFORM" == "macos" ]]; then
+  echo "OK macOS detected - audio playback available (say, afplay)"
+elif [[ "$PLATFORM" == "linux" ]]; then
+  AUDIO_PLAYERS=""
+  command -v aplay &> /dev/null && AUDIO_PLAYERS="$AUDIO_PLAYERS aplay"
+  command -v paplay &> /dev/null && AUDIO_PLAYERS="$AUDIO_PLAYERS paplay"
+  command -v mpv &> /dev/null && AUDIO_PLAYERS="$AUDIO_PLAYERS mpv"
+  if [ -n "$AUDIO_PLAYERS" ]; then
+    echo "OK Linux audio players available:$AUDIO_PLAYERS"
+  else
+    echo "WARNING No audio player found - install aplay, paplay, or mpv"
+  fi
 fi
 ```
 
@@ -93,11 +150,17 @@ fi
 Tell the user what you found:
 ```
 "Here's what I found on your system:
+- Platform: [macOS / Linux]
 - pai-core-install: [installed / NOT INSTALLED - REQUIRED]
 - Existing VoiceServer: [Yes / No]
 - Bun runtime: [installed vX.X / NOT INSTALLED - REQUIRED]
 - Port 8888: [available / in use]
 - ElevenLabs API key: [configured / not configured]
+- Piper TTS: [installed / not installed]
+- Piper voice models: [found / not found]
+- Python3: [installed / not installed]
+- NVIDIA GPU: [detected / not detected]
+- Audio playback: [available / WARNING - install audio player]
 - Backup directories with credentials: [found / none]"
 ```
 
@@ -157,7 +220,7 @@ Tell the user what you found:
   "options": [
     {"label": "Yes, I have an API key", "description": "I'll configure ElevenLabs for natural voice"},
     {"label": "Help me get one", "description": "Guide me through ElevenLabs signup"},
-    {"label": "Use macOS voice (Recommended)", "description": "Use built-in macOS voice - can add ElevenLabs later"}
+    {"label": "Use local/system voice (Recommended)", "description": "Use local TTS engine (Linux) or built-in voice (macOS) - can add ElevenLabs later"}
   ]
 }
 ```
@@ -172,7 +235,28 @@ Tell the user what you found:
 5. Come back and we'll configure it"
 ```
 
-### Question 4: Restore from Backup
+### Question 4: TTS Engine Selection (Linux without ElevenLabs)
+
+**Only ask on Linux when user chose NOT to use ElevenLabs:**
+
+```json
+{
+  "header": "TTS Engine",
+  "question": "Which local TTS engine should be the default? (You can change this later via PAI_TTS_ENGINE env var)",
+  "multiSelect": false,
+  "options": [
+    {"label": "Piper TTS (Recommended)", "description": "Fast CPU-based neural TTS (~2.6s). Requires piper binary and model download (~60MB)"},
+    {"label": "Qwen3-TTS", "description": "Highest quality local TTS (~25s first response). Requires NVIDIA GPU + CUDA + Python"},
+    {"label": "System fallback", "description": "Use espeak (Linux) or say (macOS) - instant but robotic"}
+  ]
+}
+```
+
+**Notes:**
+- On macOS without ElevenLabs, skip this question and default to `say` (macOS built-in).
+- If user chose ElevenLabs, skip this question -- ElevenLabs is the primary engine with system fallback.
+
+### Question 5: Restore from Backup
 
 **Only ask if backup directories with .env files were found:**
 
@@ -188,12 +272,12 @@ Tell the user what you found:
 }
 ```
 
-### Question 5: Final Confirmation
+### Question 6: Final Confirmation
 
 ```json
 {
   "header": "Install",
-  "question": "Ready to install PAI Voice System v2.3.0?",
+  "question": "Ready to install PAI Voice System v2.6.0?",
   "multiSelect": false,
   "options": [
     {"label": "Yes, install now (Recommended)", "description": "Proceeds with installation"},
@@ -225,7 +309,12 @@ fi
 ### Stop Existing Server (if port 8888 was in use)
 
 ```bash
-lsof -ti :8888 | xargs kill -9 2>/dev/null || true
+# Cross-platform port kill
+if [[ "$OSTYPE" == "darwin"* ]]; then
+  lsof -ti :8888 | xargs kill -9 2>/dev/null || true
+elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
+  fuser -k 8888/tcp 2>/dev/null || true
+fi
 echo "Stopped existing process on port 8888"
 ```
 
@@ -240,6 +329,8 @@ echo "Stopped existing process on port 8888"
   "todos": [
     {"content": "Create directory structure", "status": "pending", "activeForm": "Creating directory structure"},
     {"content": "Copy VoiceServer files from pack", "status": "pending", "activeForm": "Copying VoiceServer files"},
+    {"content": "Set up platform service files", "status": "pending", "activeForm": "Setting up platform service files"},
+    {"content": "Set up TTS engine", "status": "pending", "activeForm": "Setting up TTS engine"},
     {"content": "Configure credentials", "status": "pending", "activeForm": "Configuring credentials"},
     {"content": "Start voice server", "status": "pending", "activeForm": "Starting voice server"},
     {"content": "Test voice notification", "status": "pending", "activeForm": "Testing voice notification"},
@@ -267,18 +358,138 @@ mkdir -p "$PAI_DIR/VoiceServer"
 PACK_DIR="$(pwd)"
 PAI_DIR="${PAI_DIR:-$HOME/.claude}"
 
+# Copy core VoiceServer files
 cp -r "$PACK_DIR/src/VoiceServer/"* "$PAI_DIR/VoiceServer/"
 chmod +x "$PAI_DIR/VoiceServer/"*.sh 2>/dev/null || true
+
+# Copy Qwen3 support directory
+if [ -d "$PACK_DIR/src/VoiceServer/qwen" ]; then
+  cp -r "$PACK_DIR/src/VoiceServer/qwen" "$PAI_DIR/VoiceServer/"
+fi
 ```
 
 **Files included:**
 - `server.ts` - Main voice server
 - `package.json` - Dependencies
-- Management scripts
+- `start.sh` / `stop.sh` - Management scripts (handle Qwen3 server startup automatically)
+- `qwen/` - Qwen3-TTS support files
 
 **Mark todo as completed.**
 
-### 4.3 Configure Credentials
+### 4.3 Set Up Platform Service Files
+
+**Mark todo "Set up platform service files" as in_progress.**
+
+```bash
+PACK_DIR="$(pwd)"
+PAI_DIR="${PAI_DIR:-$HOME/.claude}"
+
+if [[ "$OSTYPE" == "darwin"* ]]; then
+  # macOS: copy LaunchAgent files
+  if [ -d "$PACK_DIR/src/macos-service" ]; then
+    cp -r "$PACK_DIR/src/macos-service/"* "$PAI_DIR/VoiceServer/"
+    # Install LaunchAgent if plist exists
+    if [ -f "$PAI_DIR/VoiceServer/com.pai.voice-server.plist" ]; then
+      mkdir -p "$HOME/Library/LaunchAgents"
+      cp "$PAI_DIR/VoiceServer/com.pai.voice-server.plist" "$HOME/Library/LaunchAgents/"
+      echo "OK LaunchAgent installed"
+    fi
+  fi
+elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
+  # Linux: copy systemd user service files
+  if [ -d "$PACK_DIR/src/linux-service" ]; then
+    cp -r "$PACK_DIR/src/linux-service/"* "$PAI_DIR/VoiceServer/"
+    # Install systemd user service if unit file exists
+    if [ -f "$PAI_DIR/VoiceServer/pai-voice-server.service" ]; then
+      mkdir -p "$HOME/.config/systemd/user"
+      cp "$PAI_DIR/VoiceServer/pai-voice-server.service" "$HOME/.config/systemd/user/"
+      systemctl --user daemon-reload
+      echo "OK systemd user service installed"
+    fi
+  fi
+fi
+```
+
+**Mark todo as completed.**
+
+### 4.4 Set Up TTS Engine
+
+**Mark todo "Set up TTS engine" as in_progress.**
+
+**If user chose Piper TTS:**
+
+```bash
+PAI_DIR="${PAI_DIR:-$HOME/.claude}"
+
+# Install piper binary if not present
+if ! command -v piper &> /dev/null; then
+  echo "Piper not found. Install it using your package manager:"
+  echo "  Arch Linux: yay -S piper-tts-bin"
+  echo "  Ubuntu/Debian: See https://github.com/rhasspy/piper/releases"
+  echo "  Or download the binary directly from the releases page."
+fi
+
+# Download default voice model if not present
+PIPER_VOICES_DIR="$HOME/.local/share/piper-voices"
+mkdir -p "$PIPER_VOICES_DIR"
+if [ ! -f "$PIPER_VOICES_DIR/en_US-ryan-high.onnx" ]; then
+  echo "Downloading default Piper voice model (en_US-ryan-high, ~60MB)..."
+  curl -L -o "$PIPER_VOICES_DIR/en_US-ryan-high.onnx" \
+    "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ryan/high/en_US-ryan-high.onnx"
+  curl -L -o "$PIPER_VOICES_DIR/en_US-ryan-high.onnx.json" \
+    "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ryan/high/en_US-ryan-high.onnx.json"
+  echo "OK Voice model downloaded"
+fi
+
+# Set TTS engine in ~/.env
+if ! grep -q "PAI_TTS_ENGINE" ~/.env 2>/dev/null; then
+  echo 'PAI_TTS_ENGINE="piper"' >> ~/.env
+  echo "OK PAI_TTS_ENGINE set to piper in ~/.env"
+fi
+```
+
+**If user chose Qwen3-TTS:**
+
+```bash
+PAI_DIR="${PAI_DIR:-$HOME/.claude}"
+QWEN_DIR="$PAI_DIR/VoiceServer/qwen"
+
+if [ -d "$QWEN_DIR" ]; then
+  # Create Python virtual environment
+  python3 -m venv "$QWEN_DIR/.venv"
+  echo "OK Python venv created"
+
+  # Install dependencies from pyproject.toml
+  source "$QWEN_DIR/.venv/bin/activate"
+  pip install -e "$QWEN_DIR"
+  deactivate
+  echo "OK Qwen3 dependencies installed"
+
+  # Note: model files are downloaded on first use (~2-4GB)
+  echo "NOTE Qwen3 model will download on first use (~2-4GB). First response may take 60+ seconds."
+fi
+
+# Set TTS engine in ~/.env
+if ! grep -q "PAI_TTS_ENGINE" ~/.env 2>/dev/null; then
+  echo 'PAI_TTS_ENGINE="qwen3"' >> ~/.env
+  echo "OK PAI_TTS_ENGINE set to qwen3 in ~/.env"
+fi
+```
+
+**If user chose System fallback:**
+
+```bash
+# Set TTS engine in ~/.env
+if ! grep -q "PAI_TTS_ENGINE" ~/.env 2>/dev/null; then
+  echo 'PAI_TTS_ENGINE="system"' >> ~/.env
+  echo "OK PAI_TTS_ENGINE set to system in ~/.env"
+fi
+# Linux: uses espeak; macOS: uses say
+```
+
+**Mark todo as completed.**
+
+### 4.5 Configure Credentials
 
 **Mark todo "Configure credentials" as in_progress.**
 
@@ -303,9 +514,9 @@ if [ -f "$BACKUP_ENV" ]; then
 fi
 ```
 
-**If user chose macOS voice:**
+**If user chose local/system voice:**
 ```
-"Skipping ElevenLabs configuration. Voice server will use macOS built-in voice.
+"Skipping ElevenLabs configuration. Voice server will use the TTS engine selected above (or platform default).
 To enable ElevenLabs later:
 1. Get a key from https://elevenlabs.io
 2. Add to ~/.env: ELEVENLABS_API_KEY=\"your-key-here\""
@@ -313,33 +524,38 @@ To enable ElevenLabs later:
 
 **Mark todo as completed.**
 
-### 4.4 Start Voice Server
+### 4.6 Start Voice Server
 
 **Mark todo "Start voice server" as in_progress.**
 
 ```bash
 PAI_DIR="${PAI_DIR:-$HOME/.claude}"
 
-# Kill any existing voice server
-lsof -ti :8888 | xargs kill -9 2>/dev/null || true
+# Kill any existing voice server (cross-platform)
+if [[ "$OSTYPE" == "darwin"* ]]; then
+  lsof -ti :8888 | xargs kill -9 2>/dev/null || true
+elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
+  fuser -k 8888/tcp 2>/dev/null || true
+fi
 
-# Start the voice server in background
-cd "$PAI_DIR/VoiceServer" && bun run server.ts &
+# Start the voice server using start.sh (handles Qwen3 server startup automatically)
+cd "$PAI_DIR/VoiceServer" && bash start.sh
 
 # Wait for server to start
-sleep 2
+sleep 3
 
 # Verify it's running
 if curl -s http://localhost:8888/health > /dev/null; then
   echo "Voice server started on port 8888"
 else
   echo "WARNING: Voice server may not have started correctly"
+  echo "Try manual start: cd $PAI_DIR/VoiceServer && bun run server.ts"
 fi
 ```
 
 **Mark todo as completed.**
 
-### 4.5 Test Voice Notification
+### 4.7 Test Voice Notification
 
 **Mark todo "Test voice notification" as in_progress.**
 
@@ -362,50 +578,23 @@ Ask the user:
 
 **Mark todo "Run verification" as in_progress.**
 
-**Execute all checks from VERIFY.md:**
+**Execute the full verification suite from VERIFY.md.** The verification script in VERIFY.md handles cross-platform checks including:
+
+- VoiceServer directory and files
+- Server process running on port 8888 (uses `ss` on Linux, `lsof` on macOS)
+- Health endpoint responding
+- TTS engine configuration (ElevenLabs, Piper, Qwen3, or system)
+- Audio playback capability
+- Platform service installation (systemd on Linux, LaunchAgent on macOS)
 
 ```bash
 PAI_DIR="${PAI_DIR:-$HOME/.claude}"
+PACK_DIR="$(pwd)"
 
-echo "=== PAI Voice System v2.3.0 Verification ==="
-
-# Check VoiceServer directory
-echo "Checking VoiceServer directory..."
-[ -d "$PAI_DIR/VoiceServer" ] && echo "OK VoiceServer directory exists" || echo "ERROR VoiceServer directory missing"
-
-# Check server.ts
-echo ""
-echo "Checking server files..."
-[ -f "$PAI_DIR/VoiceServer/server.ts" ] && echo "OK server.ts" || echo "ERROR server.ts missing"
-
-# Check server is running
-echo ""
-echo "Checking server status..."
-if lsof -i :8888 &> /dev/null; then
-  echo "OK Voice server is running on port 8888"
-else
-  echo "ERROR Voice server is not running"
-fi
-
-# Check health endpoint
-echo ""
-echo "Checking health endpoint..."
-if curl -s http://localhost:8888/health > /dev/null; then
-  echo "OK Health endpoint responds"
-else
-  echo "ERROR Health endpoint not responding"
-fi
-
-# Check credentials
-echo ""
-echo "Checking credentials..."
-if [ -n "$ELEVENLABS_API_KEY" ] || grep -q "ELEVENLABS_API_KEY" ~/.env 2>/dev/null; then
-  echo "OK ElevenLabs credentials configured"
-else
-  echo "NOTE Using macOS voice (ElevenLabs not configured)"
-fi
-
-echo "=== Verification Complete ==="
+# Run the verification script from VERIFY.md
+# (The installing agent should read and execute VERIFY.md checks)
+echo "=== Running PAI Voice System v2.6.0 Verification ==="
+echo "See VERIFY.md for the full verification procedure."
 ```
 
 **Mark todo as completed when all checks pass.**
@@ -417,19 +606,26 @@ echo "=== Verification Complete ==="
 ### On Success
 
 ```
-"PAI Voice System v2.3.0 installed successfully!
+"PAI Voice System v2.6.0 installed successfully!
 
 What's available:
 - Voice notifications on port 8888
 - ElevenLabs natural speech (if configured)
-- macOS voice fallback
+- Local TTS: Piper / Qwen3 (if configured on Linux)
+- Platform voice fallback (say on macOS, espeak on Linux)
 - Hook integration for automatic notifications
 
-Management commands:
-- Check status: curl http://localhost:8888/health
-- Stop server: lsof -ti :8888 | xargs kill
-- Start server: cd ~/.claude/VoiceServer && bun run server.ts &
-- View logs: tail -f ~/Library/Logs/pai-voice-server.log
+Management commands (Linux):
+- Start server:   systemctl --user start pai-voice-server   OR   ~/.claude/VoiceServer/start.sh
+- Stop server:    systemctl --user stop pai-voice-server    OR   ~/.claude/VoiceServer/stop.sh
+- Check status:   systemctl --user status pai-voice-server  OR   curl http://localhost:8888/health
+- View logs:      journalctl --user -u pai-voice-server -f  OR   tail -f ~/.claude/VoiceServer/logs/voice-server.log
+
+Management commands (macOS):
+- Start server:   launchctl load ~/Library/LaunchAgents/com.pai.voice-server.plist   OR   ~/.claude/VoiceServer/start.sh
+- Stop server:    launchctl unload ~/Library/LaunchAgents/com.pai.voice-server.plist OR   ~/.claude/VoiceServer/stop.sh
+- Check status:   curl http://localhost:8888/health
+- View logs:      tail -f ~/Library/Logs/pai-voice-server.log
 
 Test it: 'Say hello'"
 ```
@@ -440,9 +636,11 @@ Test it: 'Say hello'"
 "Installation encountered issues. Here's what to check:
 
 1. Ensure pai-core-install is installed first
-2. Verify Bun is installed: `bun --version`
-3. Check port 8888 is available: `lsof -i :8888`
-4. Start server manually: `cd ~/.claude/VoiceServer && bun run server.ts`
+2. Verify Bun is installed: bun --version
+3. Check port 8888 is available:
+   - Linux: ss -tlnp | grep 8888
+   - macOS: lsof -i :8888
+4. Start server manually: cd ~/.claude/VoiceServer && bash start.sh
 5. Run the verification commands in VERIFY.md
 
 Need help? Check the Troubleshooting section below."
@@ -473,19 +671,27 @@ source ~/.zshrc  # or restart terminal
 echo $ELEVENLABS_API_KEY
 grep ELEVENLABS ~/.env
 
-# Test macOS audio
-say "test"
+# Check TTS engine setting
+grep PAI_TTS_ENGINE ~/.env
 
-# Check API key at elevenlabs.io
+# Test platform audio
+# macOS:
+say "test"
+# Linux:
+espeak "test"       # or
+echo "test" | piper --model ~/.local/share/piper-voices/en_US-ryan-high.onnx --output_raw | aplay -r 22050 -f S16_LE -t raw -c 1
 ```
 
 ### Port 8888 conflict
 
 ```bash
-# Find process
-lsof -i :8888
+# Find process (cross-platform)
+# Linux:
+ss -tlnp | grep 8888
+fuser -k 8888/tcp
 
-# Kill it
+# macOS:
+lsof -i :8888
 lsof -ti :8888 | xargs kill -9
 ```
 
@@ -497,18 +703,86 @@ bun --version
 
 # Start manually and see errors
 cd ~/.claude/VoiceServer && bun run server.ts
+
+# Or use start.sh which handles Qwen3 server too
+cd ~/.claude/VoiceServer && bash start.sh
+```
+
+### Piper not found
+
+```bash
+# Arch Linux
+yay -S piper-tts-bin
+# or from AUR: yay -S piper-tts
+
+# Ubuntu/Debian
+# Download from https://github.com/rhasspy/piper/releases
+# Extract and place 'piper' binary in your PATH
+
+# Verify installation
+piper --version
+
+# Download a voice model if missing
+mkdir -p ~/.local/share/piper-voices
+curl -L -o ~/.local/share/piper-voices/en_US-ryan-high.onnx \
+  "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ryan/high/en_US-ryan-high.onnx"
+curl -L -o ~/.local/share/piper-voices/en_US-ryan-high.onnx.json \
+  "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ryan/high/en_US-ryan-high.onnx.json"
+```
+
+### Qwen3 model download slow or failing
+
+The Qwen3 model (~2-4GB) downloads on first use. This is expected to take time.
+
+```bash
+# Check if Python venv is set up
+ls ~/.claude/VoiceServer/qwen/.venv/bin/python3
+
+# Re-install dependencies
+cd ~/.claude/VoiceServer/qwen
+source .venv/bin/activate
+pip install -e .
+deactivate
+
+# Verify CUDA is available
+python3 -c "import torch; print(torch.cuda.is_available())"
+
+# Check GPU memory (Qwen3 needs ~4GB VRAM)
+nvidia-smi
+```
+
+### Linux audio not working
+
+```bash
+# Check available audio players
+command -v aplay && echo "aplay available"
+command -v paplay && echo "paplay available"
+command -v mpv && echo "mpv available"
+
+# Install an audio player if none found
+# Arch: pacman -S alsa-utils   (for aplay)
+# Arch: pacman -S pulseaudio   (for paplay)
+# Arch: pacman -S mpv
+# Ubuntu: apt install alsa-utils / pulseaudio-utils / mpv
+
+# Test audio output
+aplay /usr/share/sounds/alsa/Front_Center.wav 2>/dev/null || \
+paplay /usr/share/sounds/freedesktop/stereo/message.oga 2>/dev/null || \
+echo "No test sounds found - try: espeak 'test'"
 ```
 
 ### Voice sounds robotic
 
-ElevenLabs provides natural voice. Without it, macOS voice is used.
+ElevenLabs or Piper provides natural voice. Without them, system voice (espeak/say) is used.
 ```bash
-# Add ElevenLabs key
+# Option 1: Add ElevenLabs key
 echo 'ELEVENLABS_API_KEY="your-key"' >> ~/.env
 
-# Restart server
-lsof -ti :8888 | xargs kill
-cd ~/.claude/VoiceServer && bun run server.ts &
+# Option 2: Switch to Piper (Linux)
+echo 'PAI_TTS_ENGINE="piper"' >> ~/.env
+
+# Restart server after changes
+cd ~/.claude/VoiceServer && bash stop.sh && bash start.sh
 ```
 
 ---
@@ -517,11 +791,17 @@ cd ~/.claude/VoiceServer && bun run server.ts &
 
 ### VoiceServer Files
 
-| File | Purpose |
-|------|---------|
+| File/Directory | Purpose |
+|----------------|---------|
 | `server.ts` | Main voice server |
 | `package.json` | Dependencies |
-| `*.sh` | Management scripts |
+| `start.sh` | Start server (handles Qwen3 sidecar) |
+| `stop.sh` | Stop server and Qwen3 sidecar |
+| `qwen/` | Qwen3-TTS Python service and config |
+| `qwen/pyproject.toml` | Qwen3 Python dependencies |
+| `linux-service/` | systemd user service unit file |
+| `macos-service/` | LaunchAgent plist file |
+| `logs/` | Log directory (Linux; macOS uses ~/Library/Logs/) |
 
 ---
 
@@ -537,12 +817,31 @@ curl -X POST http://localhost:8888/notify \
 
 ### Management
 
+**Cross-platform:**
+
 | Action | Command |
 |--------|---------|
 | Check status | `curl http://localhost:8888/health` |
-| Stop server | `lsof -ti :8888 \| xargs kill` |
-| Start server | `cd ~/.claude/VoiceServer && bun run server.ts &` |
-| View logs | `tail -f ~/Library/Logs/pai-voice-server.log` |
+| Start server | `~/.claude/VoiceServer/start.sh` |
+| Stop server | `~/.claude/VoiceServer/stop.sh` |
+
+**Linux (systemd):**
+
+| Action | Command |
+|--------|---------|
+| Start | `systemctl --user start pai-voice-server` |
+| Stop | `systemctl --user stop pai-voice-server` |
+| Status | `systemctl --user status pai-voice-server` |
+| Logs | `journalctl --user -u pai-voice-server -f` or `tail -f ~/.claude/VoiceServer/logs/voice-server.log` |
+| Enable at login | `systemctl --user enable pai-voice-server` |
+
+**macOS (launchctl):**
+
+| Action | Command |
+|--------|---------|
+| Start | `launchctl load ~/Library/LaunchAgents/com.pai.voice-server.plist` |
+| Stop | `launchctl unload ~/Library/LaunchAgents/com.pai.voice-server.plist` |
+| Logs | `tail -f ~/Library/Logs/pai-voice-server.log` |
 
 ### Integration with Hooks
 
@@ -554,6 +853,20 @@ The voice server integrates with PAI hooks for automatic notifications. Install 
 - Custom voice cloning available
 - Set voice ID in settings.json: `daidentity.voiceId`
 
-**With macOS:**
+**With Piper (Linux):**
+- Download additional voices from https://huggingface.co/rhasspy/piper-voices
+- Place `.onnx` and `.onnx.json` files in `~/.local/share/piper-voices/`
+- Configure voice in server settings or PAI_PIPER_VOICE env var
+
+**With Qwen3-TTS (Linux):**
+- Highest quality local TTS with voice cloning capability
+- Requires NVIDIA GPU with CUDA
+- Set `PAI_TTS_ENGINE=qwen3` in `~/.env`
+
+**With macOS system voice:**
 - Uses system default voice
 - Change in System Settings > Accessibility > Spoken Content
+
+**With Linux system voice (espeak):**
+- Install: `pacman -S espeak-ng` or `apt install espeak-ng`
+- Functional but robotic; consider Piper for better quality
