@@ -10,6 +10,8 @@ import { join } from 'path';
 import { paiPath } from '../lib/paths';
 import { getIdentity } from '../lib/identity';
 import { getISOTimestamp } from '../lib/time';
+
+const DEBUG = process.env.DEBUG_HOOKS === 'true';
 import { isValidVoiceCompletion, getVoiceFallback } from '../lib/response-format';
 import type { ParsedTranscript } from '../../skills/CORE/Tools/TranscriptParser';
 
@@ -92,7 +94,7 @@ async function sendNotification(payload: NotificationPayload, sessionId: string)
     });
 
     if (!response.ok) {
-      console.error('[Voice] Server error:', response.statusText);
+      if (DEBUG) console.error('[Voice] Server error:', response.statusText);
       logVoiceEvent({
         ...baseEvent,
         event_type: 'failed',
@@ -107,7 +109,7 @@ async function sendNotification(payload: NotificationPayload, sessionId: string)
       });
     }
   } catch (error) {
-    console.error('[Voice] Failed to send:', error);
+    if (DEBUG) console.error('[Voice] Failed to send:', error);
     logVoiceEvent({
       ...baseEvent,
       event_type: 'failed',
@@ -124,13 +126,13 @@ export async function handleVoice(parsed: ParsedTranscript, sessionId: string): 
 
   // Validate voice completion
   if (!isValidVoiceCompletion(voiceCompletion)) {
-    console.error(`[Voice] Invalid completion: "${voiceCompletion.slice(0, 50)}..."`);
+    if (DEBUG) console.error(`[Voice] Invalid completion: "${voiceCompletion.slice(0, 50)}..."`);
     voiceCompletion = getVoiceFallback();
   }
 
   // Skip empty or too-short messages
   if (!voiceCompletion || voiceCompletion.length < 5) {
-    console.error('[Voice] Skipping - message too short or empty');
+    if (DEBUG) console.error('[Voice] Skipping - message too short or empty');
     return;
   }
 

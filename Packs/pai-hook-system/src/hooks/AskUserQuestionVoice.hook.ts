@@ -33,6 +33,8 @@
 
 import { getIdentity } from './lib/identity';
 
+const DEBUG = process.env.DEBUG_HOOKS === 'true';
+
 interface HookInput {
   session_id: string;
   tool_name: string;
@@ -84,9 +86,9 @@ async function notifyUserInputNeeded(): Promise<void> {
       }),
     }).finally(() => clearTimeout(timeoutId));
 
-    console.error('[AskUserQuestionVoice] Voice notification sent');
+    if (DEBUG) console.error('[AskUserQuestionVoice] Voice notification sent');
   } catch (err) {
-    console.error('[AskUserQuestionVoice] Voice failed (non-critical):', err);
+    if (DEBUG) console.error('[AskUserQuestionVoice] Voice failed (non-critical):', err);
   }
 }
 
@@ -100,14 +102,14 @@ async function main() {
       process.exit(0);
     }
 
-    console.error('[AskUserQuestionVoice] AskUserQuestion detected, sending voice notification');
+    if (DEBUG) console.error('[AskUserQuestionVoice] AskUserQuestion detected, sending voice notification');
 
     // Fire-and-forget voice notification
     await notifyUserInputNeeded();
 
     process.exit(0);
   } catch (err) {
-    console.error('[AskUserQuestionVoice] Error:', err);
+    if (DEBUG) console.error('[AskUserQuestionVoice] Error:', err);
     process.exit(0); // Always exit cleanly
   }
 }
