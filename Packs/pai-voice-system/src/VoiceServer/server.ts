@@ -770,6 +770,24 @@ function spawnSafe(command: string, args: string[]): Promise<void> {
 }
 
 /**
+ * Local TTS fallback chain — used when ElevenLabs is not configured or fails.
+ * Tries engines in order: configured engine (Piper/Qwen3) → OS TTS (say/espeak).
+ * Expects text with pronunciations already applied.
+ */
+async function fallbackTTS(spokenMessage: string): Promise<void> {
+  if (PAI_TTS_ENGINE === 'piper' && checkPiperAvailable()) {
+    console.log(`Generating speech [Piper] (model: ${PIPER_DEFAULT_MODEL})`);
+    const audioBuffer = await generateSpeechPiper(spokenMessage);
+    await playAudio(audioBuffer, 'wav');
+  } else if (await checkQwen3Available()) {
+    await playQwen3Progressive(spokenMessage, "Ryan", QWEN3_DEFAULT_INSTRUCT);
+  } else {
+    console.log('Using OS TTS fallback');
+    await speakWithSay(spokenMessage);
+  }
+}
+
+/**
  * Process voice for a notification (TTS generation + playback).
  * Called by the AudioQueue worker - no polling needed, queue handles serialization.
  */
@@ -817,27 +835,16 @@ async function processNotificationVoice(
       const spokenMessage = applyPronunciations(safeMessage);
       const audioBuffer = await generateSpeech(spokenMessage, voice, prosody);
       await playAudio(audioBuffer, 'mp3', volume);
-    } else if (PAI_TTS_ENGINE === 'piper' && checkPiperAvailable()) {
-      // Piper TTS (local, CPU-based, fast) → WAV
-      const spokenMessage = applyPronunciations(safeMessage);
-      console.log(`Generating speech [Piper] (model: ${PIPER_DEFAULT_MODEL})`);
-      const audioBuffer = await generateSpeechPiper(spokenMessage);
-      await playAudio(audioBuffer, 'wav');
-    } else if (await checkQwen3Available()) {
-      // Qwen3-TTS with progressive sentence playback
-      const spokenMessage = applyPronunciations(safeMessage);
-      await playQwen3Progressive(spokenMessage, "Ryan", QWEN3_DEFAULT_INSTRUCT);
     } else {
-      // Ultimate fallback to OS TTS
-      console.log('Using OS TTS fallback (no API key, Qwen3 unavailable)');
-      await speakWithSay(applyPronunciations(safeMessage));
+      // No ElevenLabs API key — use local TTS fallback chain
+      await fallbackTTS(applyPronunciations(safeMessage));
     }
   } catch (error) {
     console.error("Failed to generate/play speech:", error);
     try {
-      await speakWithSay(applyPronunciations(safeMessage));
-    } catch (sayError) {
-      console.error("Fallback say also failed:", sayError);
+      await fallbackTTS(applyPronunciations(safeMessage));
+    } catch (fallbackError) {
+      console.error("All TTS engines failed:", fallbackError);
     }
   }
 }
