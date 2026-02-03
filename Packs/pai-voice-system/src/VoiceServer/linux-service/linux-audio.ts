@@ -1,8 +1,9 @@
 /**
- * Linux audio detection - audio players and TTS fallbacks.
+ * Linux audio detection - audio players, TTS fallbacks, and audio status.
  *
  * Detects available audio playback tools and TTS engines on Linux.
- * Returns null on non-Linux platforms.
+ * Also provides audio status detection via PulseAudio/PipeWire.
+ * Returns null/defaults on non-Linux platforms.
  */
 
 import { execSync } from "child_process";
@@ -129,4 +130,57 @@ export function detectLinuxTTS(): { command: string; args: (text: string) => str
   } catch {}
 
   return null;
+}
+
+// ============================================================================
+// Audio Status Detection
+// ============================================================================
+
+export interface AudioStatus {
+  paiAudioPlaying: boolean;
+  otherAudioPlaying: boolean;
+}
+
+/**
+ * Check what audio is currently playing on the system.
+ * Differentiates between PAI voice notifications and other audio.
+ *
+ * PAI audio is identified by: application.name = "paplay" AND media.name contains /tmp/voice-*.wav
+ * This allows us to queue PAI notifications while skipping when other audio (YouTube, music) is playing.
+ */
+export function checkAudioStatus(): AudioStatus {
+  if (!IS_LINUX) {
+    return { paiAudioPlaying: false, otherAudioPlaying: false };
+  }
+
+  try {
+    const result = execSync('pactl list sink-inputs 2>/dev/null', {
+      encoding: 'utf-8',
+      timeout: 2000,
+    });
+
+    if (!result.trim()) {
+      return { paiAudioPlaying: false, otherAudioPlaying: false };
+    }
+
+    const entries = result.split('Sink Input #').filter(e => e.trim());
+
+    let paiAudioPlaying = false;
+    let otherAudioPlaying = false;
+
+    for (const entry of entries) {
+      const isPaplay = entry.includes('application.name = "paplay"');
+      const isVoiceFile = /media\.name = "[^"]*\/tmp\/voice-[^"]*\.wav"/.test(entry);
+
+      if (isPaplay && isVoiceFile) {
+        paiAudioPlaying = true;
+      } else if (entry.includes('application.name')) {
+        otherAudioPlaying = true;
+      }
+    }
+
+    return { paiAudioPlaying, otherAudioPlaying };
+  } catch {
+    return { paiAudioPlaying: false, otherAudioPlaying: false };
+  }
 }

@@ -229,13 +229,12 @@ curl -s http://localhost:8889/health
 ```
 
 ```bash
-# Check Qwen3 PID file
-cat ~/.claude/VoiceServer/pids/qwen3-server.pid 2>/dev/null && echo "[PASS] Qwen3 PID exists" || echo "[FAIL] No Qwen3 PID"
+# Verify Qwen3 health endpoint
+curl -sf http://localhost:8889/health | grep -q '"status"' && echo "[PASS] Qwen3 healthy" || echo "[INFO] Qwen3 not running"
 ```
 
 - [ ] Qwen3 server responds on port 8889
-- [ ] Status is "healthy"
-- [ ] (Optional) PID file exists and process is alive
+- [ ] Health endpoint returns `{"status": "healthy"}`
 
 ---
 
