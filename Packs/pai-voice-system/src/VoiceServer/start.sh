@@ -71,10 +71,10 @@ if [ "$USE_QWEN3" = true ]; then
 
         # Start Qwen3 server in background using venv
         cd "$SCRIPT_DIR"
-        if [ -d ".venv" ]; then
-            nohup .venv/bin/python qwen3-server.py >> "$LOG_DIR/qwen3-server.log" 2>&1 &
+        if [ -d "qwen/.venv" ]; then
+            nohup qwen/.venv/bin/python qwen/qwen3-server.py >> "$LOG_DIR/qwen3-server.log" 2>&1 &
         else
-            nohup python3 qwen3-server.py >> "$LOG_DIR/qwen3-server.log" 2>&1 &
+            nohup python3 qwen/qwen3-server.py >> "$LOG_DIR/qwen3-server.log" 2>&1 &
         fi
         QWEN3_PID=$!
         echo "$QWEN3_PID" > "$PID_DIR/qwen3-server.pid"

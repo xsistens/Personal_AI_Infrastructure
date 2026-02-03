@@ -17,6 +17,10 @@ import { existsSync, readFileSync } from "fs";
 const IS_MACOS = platform() === 'darwin';
 const IS_LINUX = platform() === 'linux';
 
+// Verbose logging - only enabled via environment variable
+// Startup/init logs are always shown; per-request processing logs require this flag
+const VOICE_DEBUG = process.env.VOICE_DEBUG === 'true';
+
 // Qwen3-TTS internal server port (runs alongside this server)
 const QWEN3_PORT = parseInt(process.env.QWEN3_INTERNAL_PORT || "8889");
 
@@ -147,7 +151,7 @@ class AudioQueue {
         // Check for other audio (YouTube, etc.) - skip if playing
         const audioStatus = checkAudioStatus();
         if (audioStatus.otherAudioPlaying) {
-          console.log('Voice skipped: other audio currently playing');
+          if (VOICE_DEBUG) console.log('Voice skipped: other audio currently playing');
           notification.resolve(); // Resolve without playing
           continue;
         }
@@ -161,7 +165,7 @@ class AudioQueue {
         );
         notification.resolve();
       } catch (error) {
-        console.error('Queue processing error:', error);
+        if (VOICE_DEBUG) console.error('Queue processing error:', error);
         notification.reject(error instanceof Error ? error : new Error(String(error)));
       }
     }
@@ -658,7 +662,7 @@ async function playQwen3Progressive(
   if (sentences.length <= 1) {
     const audioBuffer = await generateSpeechQwen3(text, speaker, instruct);
     await playAudio(audioBuffer, 'wav');
-    console.log(`Qwen3-TTS: Completed in ${Date.now() - startTime}ms (single)`);
+    if (VOICE_DEBUG) console.log(`Qwen3-TTS: Completed in ${Date.now() - startTime}ms (single)`);
     return;
   }
 
@@ -686,7 +690,7 @@ async function playQwen3Progressive(
             playNext();
           }
         } catch (error) {
-          console.error(`Qwen3-TTS: Failed to generate sentence ${i + 1}:`, error);
+          if (VOICE_DEBUG) console.error(`Qwen3-TTS: Failed to generate sentence ${i + 1}:`, error);
           // Put empty buffer to maintain order
           audioQueue[i] = new ArrayBuffer(0);
         }
@@ -727,7 +731,7 @@ async function playQwen3Progressive(
       try {
         await playAudio(buffer, 'wav');
       } catch (error) {
-        console.error(`Qwen3-TTS: Playback error:`, error);
+        if (VOICE_DEBUG) console.error(`Qwen3-TTS: Playback error:`, error);
       }
 
       isPlaying = false;
@@ -754,7 +758,7 @@ async function playQwen3Progressive(
 
   await done;
   const totalTime = Date.now() - startTime;
-  console.log(`Qwen3-TTS: ${sentences.length} sentences, first-audio: ${firstAudioTime}ms, total: ${totalTime}ms`);
+  if (VOICE_DEBUG) console.log(`Qwen3-TTS: ${sentences.length} sentences, first-audio: ${firstAudioTime}ms, total: ${totalTime}ms`);
 }
 
 // Get volume setting from DA config or request (defaults to 1.0 = 100%)
@@ -800,7 +804,7 @@ async function playAudio(
         args.push(...linuxPlayer.volumeArg(volume));
       }
       args.push(tempFile);
-      console.log(`Playing ${format} with ${linuxPlayer.name}`);
+      if (VOICE_DEBUG) console.log(`Playing ${format} with ${linuxPlayer.name}`);
       proc = spawn(linuxPlayer.command, args);
     } else {
       // Cleanup and fail
@@ -810,7 +814,7 @@ async function playAudio(
     }
 
     proc.on('error', (error) => {
-      console.error('Error playing audio:', error);
+      if (VOICE_DEBUG) console.error('Error playing audio:', error);
       spawn('/bin/rm', ['-f', tempFile]);
       reject(error);
     });
@@ -849,13 +853,13 @@ async function speakWithSay(text: string): Promise<void> {
         proc = spawn(LINUX_TTS.command, LINUX_TTS.args(text));
       }
     } else {
-      console.warn('No TTS fallback available for this platform');
+      if (VOICE_DEBUG) console.warn('No TTS fallback available for this platform');
       resolve(); // Silently succeed - TTS fallback is optional
       return;
     }
 
     proc.on('error', (error) => {
-      console.error('Error with TTS command:', error);
+      if (VOICE_DEBUG) console.error('Error with TTS command:', error);
       reject(error);
     });
 
@@ -876,7 +880,7 @@ function spawnSafe(command: string, args: string[]): Promise<void> {
     const proc = spawn(command, args);
 
     proc.on('error', (error) => {
-      console.error(`Error spawning ${command}:`, error);
+      if (VOICE_DEBUG) console.error(`Error spawning ${command}:`, error);
       reject(error);
     });
 
@@ -921,10 +925,10 @@ async function processNotificationVoice(
             use_speaker_boost: voiceConfig.use_speaker_boost ?? DEFAULT_PROSODY.use_speaker_boost,
           };
         }
-        console.log(`Voice: ${voiceConfig.description}`);
+        if (VOICE_DEBUG) console.log(`Voice: ${voiceConfig.description}`);
       } else if (voice === DEFAULT_VOICE_ID && daVoiceProsody) {
         prosody = daVoiceProsody;
-        console.log(`Voice: DA default`);
+        if (VOICE_DEBUG) console.log(`Voice: DA default`);
       }
 
       if (requestProsody) {
@@ -933,7 +937,7 @@ async function processNotificationVoice(
 
       const settings = { ...DEFAULT_PROSODY, ...prosody };
       const volume = (prosody as any)?.volume ?? daVoiceProsody?.volume;
-      console.log(`Generating speech [ElevenLabs] (voice: ${voice}, stability: ${settings.stability}, style: ${settings.style}, speed: ${settings.speed}, volume: ${volume ?? 1.0})`);
+      if (VOICE_DEBUG) console.log(`Generating speech [ElevenLabs] (voice: ${voice}, stability: ${settings.stability}, style: ${settings.style}, speed: ${settings.speed}, volume: ${volume ?? 1.0})`);
 
       const spokenMessage = applyPronunciations(safeMessage);
       const audioBuffer = await generateSpeech(spokenMessage, voice, prosody);
@@ -944,15 +948,15 @@ async function processNotificationVoice(
       await playQwen3Progressive(spokenMessage, "Ryan", QWEN3_DEFAULT_INSTRUCT);
     } else {
       // Ultimate fallback to OS TTS
-      console.log('Using OS TTS fallback (no API key, Qwen3 unavailable)');
+      if (VOICE_DEBUG) console.log('Using OS TTS fallback (no API key, Qwen3 unavailable)');
       await speakWithSay(applyPronunciations(safeMessage));
     }
   } catch (error) {
-    console.error("Failed to generate/play speech:", error);
+    if (VOICE_DEBUG) console.error("Failed to generate/play speech:", error);
     try {
       await speakWithSay(applyPronunciations(safeMessage));
     } catch (sayError) {
-      console.error("Fallback say also failed:", sayError);
+      if (VOICE_DEBUG) console.error("Fallback say also failed:", sayError);
     }
   }
 }
@@ -993,7 +997,7 @@ async function sendNotification(
       voiceId: voiceId,
       prosody: requestProsody,
     }).catch(error => {
-      console.error('Voice queue error:', error);
+      if (VOICE_DEBUG) console.error('Voice queue error:', error);
     });
   }
 
@@ -1011,11 +1015,11 @@ async function sendNotification(
         await spawnSafe('notify-send', [safeTitle, safeMessage]);
       } catch {
         // notify-send not available, skip desktop notification
-        console.log('notify-send not available, skipping desktop notification');
+        if (VOICE_DEBUG) console.log('notify-send not available, skipping desktop notification');
       }
     }
   } catch (error) {
-    console.error("Notification display error:", error);
+    if (VOICE_DEBUG) console.error("Notification display error:", error);
   }
 }
 
@@ -1089,7 +1093,7 @@ const server = serve({
           throw new Error('Invalid voice_id');
         }
 
-        console.log(`Notification: "${title}" - "${message}" (voice: ${voiceEnabled}, voiceId: ${voiceId || DEFAULT_VOICE_ID})`);
+        if (VOICE_DEBUG) console.log(`Notification: "${title}" - "${message}" (voice: ${voiceEnabled}, voiceId: ${voiceId || DEFAULT_VOICE_ID})`);
 
         await sendNotification(title, message, voiceEnabled, voiceId, voiceSettings);
 
@@ -1101,7 +1105,7 @@ const server = serve({
           }
         );
       } catch (error: any) {
-        console.error("Notification error:", error);
+        if (VOICE_DEBUG) console.error("Notification error:", error);
         return new Response(
           JSON.stringify({ status: "error", message: error.message || "Internal server error" }),
           {
@@ -1118,7 +1122,7 @@ const server = serve({
         const title = data.title || "PAI Assistant";
         const message = data.message || "Task completed";
 
-        console.log(`PAI notification: "${title}" - "${message}"`);
+        if (VOICE_DEBUG) console.log(`PAI notification: "${title}" - "${message}"`);
 
         await sendNotification(title, message, true, null);
 
@@ -1130,7 +1134,7 @@ const server = serve({
           }
         );
       } catch (error: any) {
-        console.error("PAI notification error:", error);
+        if (VOICE_DEBUG) console.error("PAI notification error:", error);
         return new Response(
           JSON.stringify({ status: "error", message: error.message || "Internal server error" }),
           {
@@ -1201,7 +1205,7 @@ async function logStartup() {
     console.log(`Note: Set ELEVENLABS_API_KEY in ~/.env for cloud TTS`);
     const qwen3Ready = await checkQwen3Available();
     if (!qwen3Ready) {
-      console.log(`Note: Start qwen3-server.py on :${QWEN3_PORT} for local TTS`);
+      console.log(`Note: Start qwen/qwen3-server.py on :${QWEN3_PORT} for local TTS`);
     }
   }
 }
