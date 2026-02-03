@@ -42,13 +42,12 @@ ls -la ~/.claude/VoiceServer/qwen/
 **Linux:**
 
 ```bash
-# Option A: Check PID files
-cat ~/.claude/VoiceServer/pids/voice-server.pid 2>/dev/null && echo "Voice server PID found" || echo "No PID file"
-cat ~/.claude/VoiceServer/pids/qwen3-server.pid 2>/dev/null && echo "Qwen3 server PID found" || echo "No Qwen3 PID file"
-
-# Option B: Check via systemctl (if installed as user service)
 systemctl --user status pai-voice-server
 ```
+
+**Expected:** The output should show `Active: active (running)` with a valid PID and uptime. If it shows `inactive (dead)` or `could not be found`, the service is not running.
+
+If you are not using systemd, check the health endpoint instead (see Check 3 below).
 
 **macOS:**
 
@@ -56,12 +55,9 @@ systemctl --user status pai-voice-server
 launchctl list | grep pai.voice
 ```
 
-**Expected:**
-- Linux (PID file): PID file exists and the process is alive (`kill -0 <pid>` returns 0)
-- Linux (systemctl): Service shows `active (running)`
-- macOS: Shows service with a PID (not `-`), e.g. `12345   0   com.pai.voice-server`
+**Expected:** Shows service with a PID (not `-`), e.g. `12345   0   com.pai.voice-server`
 
-- [ ] Service is listed / PID file exists
+- [ ] Service shows as active/running
 - [ ] Process is actually running (PID is valid)
 
 ---
@@ -162,9 +158,9 @@ grep ELEVENLABS_API_KEY ~/.env
 
 ---
 
-### 7. Menu Bar Indicator (macOS Only)
+### 7. Menu Bar Indicator (If Installed)
 
-Look in your macOS menu bar for the microphone icon (requires BitBar/xbar).
+Look in your macOS menu bar for the microphone icon.
 
 **Expected:**
 - Colored microphone icon (server running)
@@ -275,17 +271,10 @@ fi
 echo ""
 echo "2. Checking service..."
 if [ "$PLATFORM" = "linux" ]; then
-  if [ -f ~/.claude/VoiceServer/pids/voice-server.pid ]; then
-    PID=$(cat ~/.claude/VoiceServer/pids/voice-server.pid)
-    if kill -0 "$PID" 2>/dev/null; then
-      echo "   [PASS] Voice server running (PID $PID)"
-    else
-      echo "   [FAIL] PID file exists but process $PID is dead"
-    fi
-  elif systemctl --user is-active pai-voice-server > /dev/null 2>&1; then
+  if systemctl --user is-active pai-voice-server > /dev/null 2>&1; then
     echo "   [PASS] Service active (systemctl)"
   else
-    echo "   [FAIL] Service not running"
+    echo "   [FAIL] Service not running (check: systemctl --user status pai-voice-server)"
   fi
 elif [ "$PLATFORM" = "macos" ]; then
   if launchctl list 2>/dev/null | grep -q "com.pai.voice-server"; then
