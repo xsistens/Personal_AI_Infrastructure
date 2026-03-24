@@ -17,7 +17,7 @@ const DEFAULT_IDENTITY = {
   name: 'PAI',
   fullName: 'Personal AI',
   displayName: 'PAI',
-  mainDAVoiceID: '',
+  voiceId: '',
   color: '#3B82F6',
 };
 
@@ -27,38 +27,21 @@ const DEFAULT_PRINCIPAL = {
   timezone: 'UTC',
 };
 
-export interface VoiceProsody {
-  stability: number;
-  similarity_boost: number;
-  style: number;
-  speed: number;
-  use_speaker_boost: boolean;
-}
-
-export interface VoicePersonality {
-  baseVoice: string;
-  enthusiasm: number;
-  energy: number;
-  expressiveness: number;
-  resilience: number;
-  composure: number;
-  optimism: number;
-  warmth: number;
-  formality: number;
-  directness: number;
-  precision: number;
-  curiosity: number;
-  playfulness: number;
+export interface VoiceSettings {
+  stability?: number;
+  similarity_boost?: number;
+  style?: number;
+  speed?: number;
+  use_speaker_boost?: boolean;
 }
 
 export interface Identity {
   name: string;
   fullName: string;
   displayName: string;
-  mainDAVoiceID: string;
+  voiceId: string;
   color: string;
-  voice?: VoiceProsody;
-  personality?: VoicePersonality;
+  voice?: VoiceSettings;
 }
 
 export interface Principal {
@@ -71,6 +54,8 @@ export interface Settings {
   daidentity?: Partial<Identity>;
   principal?: Partial<Principal>;
   env?: Record<string, string>;
+  /** When true, skips non-essential voice notifications. Defaults to false. */
+  reducedVoiceFeedback?: boolean;
   [key: string]: unknown;
 }
 
@@ -104,21 +89,16 @@ export function getIdentity(): Identity {
   const settings = loadSettings();
 
   // Prefer settings.daidentity, fall back to env.DA for backward compat
-  const daidentity = settings.daidentity || {};
+  const daidentity = settings.daidentity || {} as Record<string, unknown>;
   const envDA = settings.env?.DA;
 
-  // Support both old (daidentity.voice) and new (daidentity.voices.main) structures
-  const voices = (daidentity as any).voices || {};
-  const voiceConfig = voices.main || (daidentity as any).voice;
-
   return {
-    name: daidentity.name || envDA || DEFAULT_IDENTITY.name,
-    fullName: daidentity.fullName || daidentity.name || envDA || DEFAULT_IDENTITY.fullName,
-    displayName: daidentity.displayName || daidentity.name || envDA || DEFAULT_IDENTITY.displayName,
-    mainDAVoiceID: voiceConfig?.voiceId || (daidentity as any).voiceId || daidentity.mainDAVoiceID || DEFAULT_IDENTITY.mainDAVoiceID,
-    color: daidentity.color || DEFAULT_IDENTITY.color,
-    voice: voiceConfig as VoiceProsody | undefined,
-    personality: (daidentity as any).personality as VoicePersonality | undefined,
+    name: (daidentity.name as string) || envDA || DEFAULT_IDENTITY.name,
+    fullName: (daidentity.fullName as string) || (daidentity.name as string) || envDA || DEFAULT_IDENTITY.fullName,
+    displayName: (daidentity.displayName as string) || (daidentity.name as string) || envDA || DEFAULT_IDENTITY.displayName,
+    voiceId: (daidentity.voiceId as string) || DEFAULT_IDENTITY.voiceId,
+    color: (daidentity.color as string) || DEFAULT_IDENTITY.color,
+    voice: daidentity.voice as VoiceSettings | undefined,
   };
 }
 
@@ -164,7 +144,7 @@ export function getPrincipalName(): string {
  * Get just the voice ID (convenience function)
  */
 export function getVoiceId(): string {
-  return getIdentity().mainDAVoiceID;
+  return getIdentity().voiceId;
 }
 
 /**
@@ -189,15 +169,12 @@ export function getDefaultPrincipal(): Principal {
 }
 
 /**
- * Get voice prosody settings (convenience function) - legacy ElevenLabs
+ * Check if reduced voice feedback is enabled.
+ * When true, skips non-essential voice notifications (session start, integrity check, algorithm phases).
+ * Essential notifications (prompt acknowledgment, completion, user questions) always play.
+ * Defaults to false for backwards compatibility.
  */
-export function getVoiceProsody(): VoiceProsody | undefined {
-  return getIdentity().voice;
-}
-
-/**
- * Get voice personality settings (convenience function) - Qwen3-TTS
- */
-export function getVoicePersonality(): VoicePersonality | undefined {
-  return getIdentity().personality;
+export function isReducedVoiceFeedback(): boolean {
+  const settings = loadSettings();
+  return settings.reducedVoiceFeedback === true;
 }

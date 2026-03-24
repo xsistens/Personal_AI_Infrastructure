@@ -1,10 +1,11 @@
 #!/bin/bash
 
-# Start the PAI Voice Server
+# Start the PAI Voice Server on Linux
 # - TypeScript/Bun main server on port 8888
 # - Python Qwen3-TTS server on port 8889 (when no ELEVENLABS_API_KEY)
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+VOICE_DIR="$SCRIPT_DIR/.."
 PID_DIR="$HOME/.claude/VoiceServer/pids"
 LOG_DIR="$HOME/.claude/VoiceServer/logs"
 
@@ -19,7 +20,7 @@ NC='\033[0m'
 mkdir -p "$PID_DIR" "$LOG_DIR"
 
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${BLUE}  PAI Voice Server Startup${NC}"
+echo -e "${BLUE}  PAI Voice Server Startup (Linux)${NC}"
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
 # Check if main server is already running
@@ -27,7 +28,7 @@ if [ -f "$PID_DIR/voice-server.pid" ]; then
     PID=$(cat "$PID_DIR/voice-server.pid")
     if ps -p "$PID" > /dev/null 2>&1; then
         echo -e "${YELLOW}! Main server already running (PID: $PID)${NC}"
-        echo "  Use ./restart.sh to restart"
+        echo "  Use ../restart.sh to restart"
         exit 0
     fi
 fi
@@ -42,17 +43,6 @@ if [ -n "$ELEVENLABS_API_KEY" ]; then
     echo -e "${GREEN}✓ ElevenLabs API key found${NC}"
     echo -e "  Mode: ElevenLabs (cloud) → MP3"
     USE_QWEN3=false
-elif [ "$PAI_TTS_ENGINE" = "piper" ]; then
-    if command -v piper &> /dev/null; then
-        echo -e "${GREEN}✓ Piper TTS found: $(which piper)${NC}"
-        echo -e "  Mode: Piper TTS (local CPU) → WAV"
-        USE_QWEN3=false
-    else
-        echo -e "${YELLOW}! PAI_TTS_ENGINE=piper but piper not found${NC}"
-        echo -e "  Install: pip install piper-tts (or piper-tts-bin from AUR)"
-        echo -e "  Falling back to Qwen3-TTS"
-        USE_QWEN3=true
-    fi
 else
     echo -e "${YELLOW}! No ELEVENLABS_API_KEY in ~/.env${NC}"
     echo -e "  Mode: Qwen3-TTS (local) → WAV"
@@ -81,11 +71,11 @@ if [ "$USE_QWEN3" = true ]; then
         fi
 
         # Start Qwen3 server in background using venv
-        cd "$SCRIPT_DIR"
-        if [ -d ".venv" ]; then
-            nohup .venv/bin/python qwen3-server.py >> "$LOG_DIR/qwen3-server.log" 2>&1 &
+        cd "$VOICE_DIR"
+        if [ -d "qwen/.venv" ]; then
+            nohup qwen/.venv/bin/python qwen/qwen3-server.py >> "$LOG_DIR/qwen3-server.log" 2>&1 &
         else
-            nohup python3 qwen3-server.py >> "$LOG_DIR/qwen3-server.log" 2>&1 &
+            nohup python3 qwen/qwen3-server.py >> "$LOG_DIR/qwen3-server.log" 2>&1 &
         fi
         QWEN3_PID=$!
         echo "$QWEN3_PID" > "$PID_DIR/qwen3-server.pid"
@@ -115,7 +105,7 @@ if ! command -v bun &> /dev/null; then
     exit 1
 fi
 
-cd "$SCRIPT_DIR"
+cd "$VOICE_DIR"
 nohup bun run server.ts >> "$LOG_DIR/voice-server.log" 2>&1 &
 MAIN_PID=$!
 echo "$MAIN_PID" > "$PID_DIR/voice-server.pid"

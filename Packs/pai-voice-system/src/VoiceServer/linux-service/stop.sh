@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Stop the PAI Voice Server
+# Stop the PAI Voice Server on Linux
 # Stops both the main server (8888) and Qwen3-TTS server (8889)
 
 PID_DIR="$HOME/.claude/VoiceServer/pids"
@@ -13,7 +13,7 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${BLUE}  PAI Voice Server Shutdown${NC}"
+echo -e "${BLUE}  PAI Voice Server Shutdown (Linux)${NC}"
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
 STOPPED=0
